@@ -30,7 +30,9 @@ export function LoginScreen({ onGoogleCredential, onDemoLogin }: LoginScreenProp
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
+  const googleClientId =
+    (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ||
+    '1000204276828-dfpdv7cfnske1hctbbecivnc0icqqjbf.apps.googleusercontent.com';
 
   useEffect(() => {
     if (!googleClientId || !googleBtnRef.current) {
