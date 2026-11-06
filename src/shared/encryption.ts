@@ -30,45 +30,70 @@ function fromBase64Url(str: string): Uint8Array {
 const PBKDF2_ITERATIONS = 100_000;
 const AES_KEY_LENGTH = 256;
 const GCM_IV_LENGTH = 12; // 96 bits recomendado para AES-GCM
+const MAX_KEY_CACHE_SIZE = 128;
+
+const derivedKeyCache = new Map<string, Promise<CryptoKey>>();
 
 /**
  * Deriva una CryptoKey de AES-GCM de 256 bits de forma determinística
  * a partir del ID de Google del usuario ('sub'), una sal criptográfica y la clave de sesión del sistema.
+ * Incluye caché en memoria por isolate para evitar recalcular 100.000 iteraciones PBKDF2 en cada request.
  */
 export async function deriveUserAesKey(
   googleSubId: string,
   userSalt: string,
   systemSecret: string
 ): Promise<CryptoKey> {
-  const encoder = new TextEncoder();
-  const keyMaterialText = `${googleSubId}:${systemSecret}`;
-  const keyMaterialBytes = encoder.encode(keyMaterialText);
+  const cacheKey = `${googleSubId}:${userSalt}:${systemSecret}`;
+  const cached = derivedKeyCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
 
-  // 1. Importar el material base como clave cruda para PBKDF2
-  const baseKey = await crypto.subtle.importKey(
-    'raw',
-    keyMaterialBytes,
-    'PBKDF2',
-    false,
-    ['deriveKey']
-  );
+  const keyPromise = (async () => {
+    const encoder = new TextEncoder();
+    const keyMaterialText = `${googleSubId}:${systemSecret}`;
+    const keyMaterialBytes = encoder.encode(keyMaterialText);
 
-  // 2. Preparar la sal (debe tener al menos 16 bytes)
-  const saltBytes = encoder.encode(userSalt.padEnd(16, '0'));
+    // 1. Importar el material base como clave cruda para PBKDF2
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      keyMaterialBytes,
+      'PBKDF2',
+      false,
+      ['deriveKey']
+    );
 
-  // 3. Derivar la clave simétrica AES-GCM de 256 bits
-  return crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: saltBytes,
-      iterations: PBKDF2_ITERATIONS,
-      hash: 'SHA-256',
-    },
-    baseKey,
-    { name: 'AES-GCM', length: AES_KEY_LENGTH },
-    false,
-    ['encrypt', 'decrypt']
-  );
+    // 2. Preparar la sal (debe tener al menos 16 bytes)
+    const saltBytes = encoder.encode(userSalt.padEnd(16, '0'));
+
+    // 3. Derivar la clave simétrica AES-GCM de 256 bits
+    return crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: saltBytes,
+        iterations: PBKDF2_ITERATIONS,
+        hash: 'SHA-256',
+      },
+      baseKey,
+      { name: 'AES-GCM', length: AES_KEY_LENGTH },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  })();
+
+  if (derivedKeyCache.size >= MAX_KEY_CACHE_SIZE) {
+    const oldestKey = derivedKeyCache.keys().next().value;
+    if (oldestKey) derivedKeyCache.delete(oldestKey);
+  }
+  derivedKeyCache.set(cacheKey, keyPromise);
+
+  try {
+    return await keyPromise;
+  } catch (err) {
+    derivedKeyCache.delete(cacheKey);
+    throw err;
+  }
 }
 
 const ENC_PREFIX = 'enc:';

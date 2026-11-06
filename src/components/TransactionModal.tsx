@@ -141,7 +141,7 @@ export function TransactionModal({
             type="button"
             onClick={onClose}
             aria-label="Cerrar modal"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 cursor-pointer"
+            className="btn-secondary p-1.5"
           >
             <X className="w-4 h-4" />
           </button>
@@ -149,7 +149,7 @@ export function TransactionModal({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Selector de Tipo */}
-          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 rounded-lg">
+          <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 border border-slate-200 rounded-lg">
             {(
               [
                 { id: 'expense', label: 'Gasto' },
@@ -165,10 +165,10 @@ export function TransactionModal({
                   setDuplicates([]);
                   setDuplicateConfirmed(false);
                 }}
-                className={`py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                className={`py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
                   type === opt.id
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
+                    ? 'bg-indigo-600 text-white shadow-xs'
+                    : 'text-slate-700 hover:bg-white'
                 }`}
               >
                 {opt.label}
@@ -342,14 +342,14 @@ export function TransactionModal({
             <button
               type="button"
               onClick={onClose}
-              className="py-2 px-4 rounded-lg border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+              className="btn-secondary py-2 px-4 text-sm"
             >
               Cancelar
             </button>
             <button
               type="submit"
               disabled={submitting}
-              className="py-2 px-4 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+              className="btn-primary py-2 px-4 text-sm disabled:opacity-50"
             >
               {submitting ? 'Guardando...' : 'Guardar Movimiento'}
             </button>

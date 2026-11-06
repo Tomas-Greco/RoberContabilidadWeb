@@ -196,7 +196,7 @@ export function AccountsCategoriesView({
               <button
                 type="submit"
                 disabled={accSubmitting}
-                className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-4 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+                className="btn-primary w-full py-2 px-4 text-sm disabled:opacity-50"
               >
                 <Plus className="w-4 h-4" aria-hidden="true" />
                 <span>Agregar Cuenta</span>
@@ -245,9 +245,10 @@ export function AccountsCategoriesView({
                           ? `Desarchivar ${acc.name}`
                           : `Archivar ${acc.name}`
                       }
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-slate-900 hover:bg-slate-100 cursor-pointer"
+                      className="btn-secondary py-1 px-2.5 text-xs"
                     >
-                      <Archive className="w-4 h-4" aria-hidden="true" />
+                      <Archive className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>{acc.archived === 1 ? 'Restaurar' : 'Archivar'}</span>
                     </button>
                   </div>
                 </li>
@@ -318,7 +319,7 @@ export function AccountsCategoriesView({
             <button
               type="submit"
               disabled={catSubmitting}
-              className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-4 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+              className="btn-primary w-full py-2 px-4 text-sm disabled:opacity-50"
             >
               <Plus className="w-4 h-4" aria-hidden="true" />
               <span>Agregar Categoría</span>

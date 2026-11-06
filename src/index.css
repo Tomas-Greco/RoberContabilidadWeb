@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
@@ -9,13 +11,226 @@
 @layer base {
   body {
     font-family: var(--font-sans);
-    background-color: #f8fafc;
+    background-color: #f1f5f9;
     color: #0f172a;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+
+  html.dark body {
+    background-color: #0b0f19;
+    color: #f8fafc;
   }
 
   h1, h2, h3, h4 {
     font-family: var(--font-display);
   }
+}
+
+/* Sistema de Botones con Recuadro, Contraste y Jerarquía Visual Clara */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  background-color: #4f46e5;
+  color: #ffffff;
+  border: 1px solid #4338ca;
+  box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.12);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-primary:hover:not(:disabled) {
+  background-color: #4338ca;
+  border-color: #3730a3;
+}
+html.dark .btn-primary {
+  background-color: #6366f1;
+  border-color: #818cf8;
+  color: #ffffff;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.4);
+}
+html.dark .btn-primary:hover:not(:disabled) {
+  background-color: #4f46e5;
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  background-color: #e2e8f0;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.06);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-secondary:hover:not(:disabled) {
+  background-color: #cbd5e1;
+  border-color: #94a3b8;
+}
+html.dark .btn-secondary {
+  background-color: #1e293b;
+  color: #f1f5f9;
+  border: 1px solid #475569;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+}
+html.dark .btn-secondary:hover:not(:disabled) {
+  background-color: #334155;
+  border-color: #64748b;
+}
+
+.btn-accent-soft {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  background-color: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+  box-shadow: 0 1px 2px 0 rgba(79, 70, 229, 0.06);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-accent-soft:hover:not(:disabled) {
+  background-color: #e0e7ff;
+  border-color: #a5b4fc;
+}
+html.dark .btn-accent-soft {
+  background-color: rgba(79, 70, 229, 0.2);
+  color: #c7d2fe;
+  border: 1px solid rgba(129, 140, 248, 0.45);
+}
+html.dark .btn-accent-soft:hover:not(:disabled) {
+  background-color: rgba(79, 70, 229, 0.32);
+  border-color: rgba(165, 180, 252, 0.65);
+}
+
+.btn-danger-soft {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  background-color: #fff1f2;
+  color: #be123c;
+  border: 1px solid #fecdd3;
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.btn-danger-soft:hover:not(:disabled) {
+  background-color: #ffe4e6;
+  border-color: #fda4af;
+}
+html.dark .btn-danger-soft {
+  background-color: rgba(225, 29, 72, 0.18);
+  color: #fda4af;
+  border: 1px solid rgba(251, 113, 133, 0.4);
+}
+html.dark .btn-danger-soft:hover:not(:disabled) {
+  background-color: rgba(225, 29, 72, 0.28);
+}
+
+/* Adaptación Integral de Superficies, Tarjetas, Tablas y Controles en Modo Oscuro */
+html.dark .bg-slate-50 {
+  background-color: #0b0f19;
+}
+html.dark .bg-white {
+  background-color: #111827;
+}
+html.dark .bg-slate-100 {
+  background-color: #1e293b;
+}
+html.dark .bg-slate-50\/60,
+html.dark .bg-slate-50\/80,
+html.dark .hover\:bg-slate-50\/80:hover,
+html.dark .hover\:bg-slate-50:hover {
+  background-color: #1e293b;
+}
+html.dark .border-slate-200,
+html.dark .border-slate-300 {
+  border-color: #263248;
+}
+html.dark .border-slate-100 {
+  border-color: #1e293b;
+}
+html.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #1e293b;
+}
+html.dark .text-slate-900,
+html.dark .text-slate-800 {
+  color: #f8fafc;
+}
+html.dark .text-slate-700,
+html.dark .text-slate-600 {
+  color: #cbd5e1;
+}
+html.dark .text-slate-500,
+html.dark .text-slate-400 {
+  color: #94a3b8;
+}
+html.dark .text-emerald-700 {
+  color: #34d399;
+}
+html.dark .text-red-700 {
+  color: #f87171;
+}
+html.dark .text-amber-700,
+html.dark .text-amber-800,
+html.dark .text-amber-900 {
+  color: #fbbf24;
+}
+html.dark .bg-emerald-50\/70,
+html.dark .bg-emerald-50 {
+  background-color: rgba(16, 185, 129, 0.14);
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #a7f3d0;
+}
+html.dark .bg-red-50\/70,
+html.dark .bg-red-50 {
+  background-color: rgba(239, 68, 68, 0.14);
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #fecaca;
+}
+html.dark .bg-amber-50,
+html.dark .bg-amber-50\/40 {
+  background-color: rgba(245, 158, 11, 0.14);
+  border-color: rgba(251, 191, 36, 0.4);
+  color: #fde68a;
+}
+
+/* Inputs, Selects y Textareas con recuadro nítido en ambos modos */
+input[type="text"],
+input[type="search"],
+input[type="date"],
+input[type="number"],
+select,
+textarea {
+  background-color: #ffffff;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+html.dark input[type="text"],
+html.dark input[type="search"],
+html.dark input[type="date"],
+html.dark input[type="number"],
+html.dark select,
+html.dark textarea {
+  background-color: #0f172a;
+  border-color: #334155;
+  color: #f8fafc;
+  color-scheme: dark;
+}
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #64748b;
 }
 
 .tabular-nums {

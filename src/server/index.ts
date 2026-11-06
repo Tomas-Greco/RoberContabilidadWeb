@@ -12,17 +12,33 @@ import {
   deriveUserAesKey,
   encryptSensitiveText,
 } from '../shared/encryption';
+import {
+  applyTradeToHolding,
+  canAutoQuoteWithYahoo,
+  InvestmentRuleError,
+} from '../shared/investments';
 import { LedgerRuleError, validateTransactionInvariants } from '../shared/ledger';
-import { assertNonNegativeCents, assertPositiveCents, MoneyValidationError } from '../shared/money';
+import { assertNonNegativeCents, assertPositiveCents, MoneyValidationError, toCents } from '../shared/money';
 import type {
   AccountRecord,
   AccountType,
+  AssetClass,
+  AssetRecord,
   CategoryKind,
   CategoryRecord,
   Currency,
   DraftSource,
+  HoldingRecord,
   MovementDraftRecord,
   ParsedMovementDraft,
+  ParsedPortfolioSnapshotRow,
+  PortfolioCashRecord,
+  PortfolioIncomeRecord,
+  PortfolioIncomeType,
+  PortfolioRecord,
+  PortfolioSnapshotDraftRecord,
+  TradeRecord,
+  TradeSide,
   TransactionRecord,
   TransactionSource,
   TransactionType,
@@ -42,6 +58,7 @@ function json(data: unknown, status = 200, headers?: Record<string, string>): Re
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
       ...headers,
     },
   });
@@ -62,6 +79,90 @@ const DEFAULT_CATEGORIES: ReadonlyArray<{ name: string; kind: 'income' | 'expens
   { name: 'Honorarios', kind: 'income' },
   { name: 'Otros Ingresos', kind: 'income' },
 ];
+
+let v2SchemaInitialized = false;
+
+async function ensureV2Schema(db: D1Database): Promise<void> {
+  if (v2SchemaInitialized) return;
+  try {
+    await db.batch([
+      db.prepare(`CREATE TABLE IF NOT EXISTS portfolios (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        broker TEXT,
+        base_currency TEXT NOT NULL CHECK(base_currency IN ('ARS', 'USD')),
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_portfolios_user ON portfolios(user_id)`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS assets (
+        id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        asset_class TEXT NOT NULL CHECK(asset_class IN ('stock', 'cedear', 'bond', 'crypto', 'fci', 'other')),
+        currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD'))
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS holdings (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+        asset_id TEXT NOT NULL REFERENCES assets(id),
+        quantity REAL NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+        avg_cost INTEGER NOT NULL DEFAULT 0 CHECK(avg_cost >= 0),
+        last_price INTEGER NOT NULL DEFAULT 0 CHECK(last_price >= 0),
+        last_price_date TEXT,
+        UNIQUE(portfolio_id, asset_id)
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_holdings_portfolio ON holdings(portfolio_id)`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS portfolio_cash (
+        portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+        amount INTEGER NOT NULL DEFAULT 0 CHECK(amount >= 0),
+        PRIMARY KEY (portfolio_id, currency)
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS portfolio_snapshot_drafts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+        raw_text TEXT,
+        rows_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed', 'discarded')),
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS trades (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+        asset_id TEXT NOT NULL REFERENCES assets(id),
+        side TEXT NOT NULL CHECK(side IN ('buy', 'sell')),
+        quantity REAL NOT NULL CHECK(quantity > 0),
+        price INTEGER NOT NULL CHECK(price > 0),
+        fee INTEGER NOT NULL DEFAULT 0 CHECK(fee >= 0),
+        date TEXT NOT NULL,
+        settlement_account_id TEXT REFERENCES accounts(id),
+        realized_gain INTEGER,
+        note TEXT,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`),
+      db.prepare(`CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio_id, date)`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS portfolio_incomes (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+        asset_id TEXT REFERENCES assets(id),
+        type TEXT NOT NULL CHECK(type IN ('dividend', 'interest')),
+        amount INTEGER NOT NULL CHECK(amount > 0),
+        currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+        date TEXT NOT NULL,
+        note TEXT
+      )`),
+    ]);
+    v2SchemaInitialized = true;
+  } catch {
+    // Si las tablas ya existen o D1 restringe batch DDL, continúa sin romper
+  }
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -187,8 +288,109 @@ export default {
         return err('Base de datos D1 no vinculada.', 500);
       }
 
-      // Clave AES-GCM 256 derivada para este usuario autenticado
+      // Clave AES-GCM 256 derivada para este usuario autenticado (con caché en memoria por isolate)
       const userAesKey = await deriveUserAesKey(user.id, user.id, secret);
+
+      // 2.5 /api/bootstrap (Carga consolidada V1 + V2 en 1 sola consulta batch D1 y 1 HTTP request)
+      if (pathname === '/api/bootstrap' && request.method === 'GET') {
+        await ensureV2Schema(env.DB);
+
+        const [
+          accountsRes,
+          categoriesRes,
+          transactionsRes,
+          draftsRes,
+          portfoliosRes,
+          assetsRes,
+          holdingsRes,
+          cashRes,
+          tradesRes,
+          incomesRes,
+          snapDraftsRes,
+        ] = await env.DB.batch([
+          env.DB.prepare(
+            'SELECT id, user_id, name, type, currency, opening_balance, csv_column_map, archived, created_at FROM accounts WHERE user_id = ? ORDER BY created_at ASC'
+          ).bind(user.id),
+          env.DB.prepare(
+            'SELECT id, user_id, name, kind, parent_id, archived FROM categories WHERE user_id = ? ORDER BY kind ASC, name ASC'
+          ).bind(user.id),
+          env.DB.prepare(
+            'SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC, created_at DESC'
+          ).bind(user.id),
+          env.DB.prepare(
+            "SELECT * FROM movement_drafts WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC"
+          ).bind(user.id),
+          env.DB.prepare('SELECT * FROM portfolios WHERE user_id = ? ORDER BY created_at ASC').bind(
+            user.id
+          ),
+          env.DB.prepare('SELECT * FROM assets ORDER BY ticker ASC'),
+          env.DB.prepare('SELECT * FROM holdings WHERE user_id = ?').bind(user.id),
+          env.DB.prepare('SELECT * FROM portfolio_cash WHERE user_id = ?').bind(user.id),
+          env.DB.prepare(
+            'SELECT * FROM trades WHERE user_id = ? ORDER BY date DESC, created_at DESC'
+          ).bind(user.id),
+          env.DB.prepare('SELECT * FROM portfolio_incomes WHERE user_id = ? ORDER BY date DESC').bind(
+            user.id
+          ),
+          env.DB.prepare(
+            "SELECT * FROM portfolio_snapshot_drafts WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC"
+          ).bind(user.id),
+        ]);
+
+        const [
+          decryptedTransactions,
+          decryptedDrafts,
+          decryptedTrades,
+          decryptedIncomes,
+          decryptedSnapshotDrafts,
+        ] = await Promise.all([
+          Promise.all(
+            ((transactionsRes.results as TransactionRecord[]) ?? []).map(async (tx) => ({
+              ...tx,
+              note: await decryptSensitiveText(tx.note, userAesKey),
+            }))
+          ),
+          Promise.all(
+            ((draftsRes.results as MovementDraftRecord[]) ?? []).map(async (draft) => ({
+              ...draft,
+              raw_input: await decryptSensitiveText(draft.raw_input, userAesKey),
+            }))
+          ),
+          Promise.all(
+            ((tradesRes.results as TradeRecord[]) ?? []).map(async (t) => ({
+              ...t,
+              note: await decryptSensitiveText(t.note, userAesKey),
+            }))
+          ),
+          Promise.all(
+            ((incomesRes.results as PortfolioIncomeRecord[]) ?? []).map(async (inc) => ({
+              ...inc,
+              note: await decryptSensitiveText(inc.note, userAesKey),
+            }))
+          ),
+          Promise.all(
+            ((snapDraftsRes.results as PortfolioSnapshotDraftRecord[]) ?? []).map(async (d) => ({
+              ...d,
+              raw_text: await decryptSensitiveText(d.raw_text, userAesKey),
+            }))
+          ),
+        ]);
+
+        return json({
+          user,
+          accounts: (accountsRes.results as AccountRecord[]) ?? [],
+          categories: (categoriesRes.results as CategoryRecord[]) ?? [],
+          transactions: decryptedTransactions,
+          drafts: decryptedDrafts,
+          portfolios: (portfoliosRes.results as PortfolioRecord[]) ?? [],
+          assets: (assetsRes.results as AssetRecord[]) ?? [],
+          holdings: (holdingsRes.results as HoldingRecord[]) ?? [],
+          portfolioCash: (cashRes.results as PortfolioCashRecord[]) ?? [],
+          trades: decryptedTrades,
+          portfolioIncomes: decryptedIncomes,
+          snapshotDrafts: decryptedSnapshotDrafts,
+        });
+      }
 
       // 3. /api/accounts
       if (pathname === '/api/accounts') {
@@ -549,6 +751,606 @@ export default {
         }
 
         return json({ ok: true, encryptedCount });
+      }
+
+      // === MÓDULO V2: ENDPOINTS DE INVERSIONES Y PATRIMONIO ===
+      await ensureV2Schema(env.DB);
+
+      // 8. /api/investments (Snapshot completo de tablas V2 para el usuario autenticado)
+      if (pathname === '/api/investments' && request.method === 'GET') {
+        const [
+          portfoliosRes,
+          assetsRes,
+          holdingsRes,
+          cashRes,
+          tradesRes,
+          incomesRes,
+          snapDraftsRes,
+        ] = await Promise.all([
+          env.DB.prepare('SELECT * FROM portfolios WHERE user_id = ? ORDER BY created_at ASC')
+            .bind(user.id)
+            .all<PortfolioRecord>(),
+          env.DB.prepare('SELECT * FROM assets ORDER BY ticker ASC').all<AssetRecord>(),
+          env.DB.prepare('SELECT * FROM holdings WHERE user_id = ?')
+            .bind(user.id)
+            .all<HoldingRecord>(),
+          env.DB.prepare('SELECT * FROM portfolio_cash WHERE user_id = ?')
+            .bind(user.id)
+            .all<PortfolioCashRecord>(),
+          env.DB.prepare('SELECT * FROM trades WHERE user_id = ? ORDER BY date DESC, created_at DESC')
+            .bind(user.id)
+            .all<TradeRecord>(),
+          env.DB.prepare('SELECT * FROM portfolio_incomes WHERE user_id = ? ORDER BY date DESC')
+            .bind(user.id)
+            .all<PortfolioIncomeRecord>(),
+          env.DB.prepare(
+            "SELECT * FROM portfolio_snapshot_drafts WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC"
+          )
+            .bind(user.id)
+            .all<PortfolioSnapshotDraftRecord>(),
+        ]);
+
+        const decryptedTrades = await Promise.all(
+          (tradesRes.results ?? []).map(async (t) => ({
+            ...t,
+            note: await decryptSensitiveText(t.note, userAesKey),
+          }))
+        );
+
+        const decryptedIncomes = await Promise.all(
+          (incomesRes.results ?? []).map(async (inc) => ({
+            ...inc,
+            note: await decryptSensitiveText(inc.note, userAesKey),
+          }))
+        );
+
+        const decryptedSnapshotDrafts = await Promise.all(
+          (snapDraftsRes.results ?? []).map(async (d) => ({
+            ...d,
+            raw_text: await decryptSensitiveText(d.raw_text, userAesKey),
+          }))
+        );
+
+        return json({
+          portfolios: portfoliosRes.results ?? [],
+          assets: assetsRes.results ?? [],
+          holdings: holdingsRes.results ?? [],
+          portfolioCash: cashRes.results ?? [],
+          trades: decryptedTrades,
+          portfolioIncomes: decryptedIncomes,
+          snapshotDrafts: decryptedSnapshotDrafts,
+        });
+      }
+
+      // 9. /api/portfolios
+      if (pathname === '/api/portfolios' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          name: string;
+          broker?: string | null;
+          base_currency: Currency;
+        };
+        const name = body.name?.trim();
+        if (!name) return err('El nombre de la cartera es obligatorio.');
+        if (body.base_currency !== 'ARS' && body.base_currency !== 'USD') {
+          return err('La moneda base debe ser ARS o USD (RN-03).');
+        }
+
+        const id = crypto.randomUUID();
+        const createdAt = Math.floor(Date.now() / 1000);
+        const broker = body.broker?.trim() || null;
+
+        await env.DB.batch([
+          env.DB.prepare(
+            'INSERT INTO portfolios (id, user_id, name, broker, base_currency, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+          ).bind(id, user.id, name, broker, body.base_currency, createdAt),
+          env.DB.prepare(
+            'INSERT INTO portfolio_cash (portfolio_id, user_id, currency, amount) VALUES (?, ?, ?, 0) ON CONFLICT(portfolio_id, currency) DO NOTHING'
+          ).bind(id, user.id, body.base_currency),
+        ]);
+
+        return json(
+          {
+            portfolio: {
+              id,
+              user_id: user.id,
+              name,
+              broker,
+              base_currency: body.base_currency,
+              created_at: createdAt,
+            },
+          },
+          201
+        );
+      }
+
+      // 10. /api/assets
+      if (pathname === '/api/assets' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          ticker: string;
+          name: string;
+          asset_class: AssetClass;
+          currency: Currency;
+        };
+        const ticker = body.ticker?.trim().toUpperCase();
+        const name = body.name?.trim();
+        if (!ticker || !name) {
+          return err('El ticker y el nombre del activo son obligatorios.');
+        }
+
+        const existing = await env.DB.prepare('SELECT * FROM assets WHERE ticker = ?')
+          .bind(ticker)
+          .first<AssetRecord>();
+        if (existing) {
+          return json({ asset: existing });
+        }
+
+        const id = crypto.randomUUID();
+        await env.DB.prepare(
+          'INSERT INTO assets (id, ticker, name, asset_class, currency) VALUES (?, ?, ?, ?, ?)'
+        )
+          .bind(id, ticker, name, body.asset_class, body.currency)
+          .run();
+
+        return json(
+          {
+            asset: {
+              id,
+              ticker,
+              name,
+              asset_class: body.asset_class,
+              currency: body.currency,
+            },
+          },
+          201
+        );
+      }
+
+      // 11. /api/holdings (Actualización manual de último precio conocido)
+      if (pathname === '/api/holdings' && request.method === 'PATCH') {
+        const body = (await request.json()) as {
+          id: string;
+          last_price: number;
+          last_price_date?: string;
+        };
+        const lastPrice = assertNonNegativeCents(body.last_price, 'last_price');
+        const dateStr = body.last_price_date || new Date().toISOString().slice(0, 10);
+
+        const existing = await env.DB.prepare(
+          'SELECT * FROM holdings WHERE id = ? AND user_id = ?'
+        )
+          .bind(body.id, user.id)
+          .first<HoldingRecord>();
+        if (!existing) return err('Tenencia no encontrada.', 404);
+
+        await env.DB.prepare(
+          'UPDATE holdings SET last_price = ?, last_price_date = ? WHERE id = ? AND user_id = ?'
+        )
+          .bind(lastPrice, dateStr, body.id, user.id)
+          .run();
+
+        return json({
+          holding: {
+            ...existing,
+            last_price: lastPrice,
+            last_price_date: dateStr,
+          },
+        });
+      }
+
+      // 12. /api/portfolio-cash (RN-06: Efectivo líquido en el broker admite >= 0 centavos)
+      if (pathname === '/api/portfolio-cash' && request.method === 'PUT') {
+        const body = (await request.json()) as {
+          portfolio_id: string;
+          currency: Currency;
+          amount: number;
+        };
+        const amount = assertNonNegativeCents(body.amount, 'portfolio_cash');
+
+        const portfolio = await env.DB.prepare(
+          'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
+        )
+          .bind(body.portfolio_id, user.id)
+          .first<PortfolioRecord>();
+        if (!portfolio) return err('Cartera no encontrada.', 404);
+
+        await env.DB.prepare(
+          `INSERT INTO portfolio_cash (portfolio_id, user_id, currency, amount)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(portfolio_id, currency) DO UPDATE SET amount = excluded.amount`
+        )
+          .bind(portfolio.id, user.id, body.currency, amount)
+          .run();
+
+        return json({
+          cash: {
+            portfolio_id: portfolio.id,
+            user_id: user.id,
+            currency: body.currency,
+            amount,
+          },
+        });
+      }
+
+      // 13. /api/trades (RN-02: Compra/Venta recalcula avg_cost y realized_gain; NO toca transactions de V1)
+      if (pathname === '/api/trades' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          portfolio_id: string;
+          asset_id: string;
+          side: TradeSide;
+          quantity: number;
+          price: number;
+          fee?: number;
+          date: string;
+          settlement_account_id?: string | null;
+          note?: string | null;
+        };
+
+        const portfolio = await env.DB.prepare(
+          'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
+        )
+          .bind(body.portfolio_id, user.id)
+          .first<PortfolioRecord>();
+        if (!portfolio) return err('Cartera no encontrada.', 404);
+
+        const asset = await env.DB.prepare('SELECT * FROM assets WHERE id = ?')
+          .bind(body.asset_id)
+          .first<AssetRecord>();
+        if (!asset) return err('Activo no encontrado.', 404);
+
+        const existingHolding = await env.DB.prepare(
+          'SELECT * FROM holdings WHERE portfolio_id = ? AND asset_id = ? AND user_id = ?'
+        )
+          .bind(portfolio.id, asset.id, user.id)
+          .first<HoldingRecord>();
+
+        let execResult;
+        try {
+          execResult = applyTradeToHolding({
+            currentQuantity: existingHolding?.quantity ?? 0,
+            currentAvgCostCents: existingHolding?.avg_cost ?? 0,
+            side: body.side,
+            tradeQuantity: body.quantity,
+            tradePriceCents: body.price,
+            feeCents: body.fee ?? 0,
+          });
+        } catch (e) {
+          if (e instanceof InvestmentRuleError || e instanceof MoneyValidationError) {
+            return err(e.message, 400);
+          }
+          return err('Error al procesar la operación de inversión.', 400);
+        }
+
+        const tradeId = crypto.randomUUID();
+        const createdAt = Math.floor(Date.now() / 1000);
+        const feeCents = assertNonNegativeCents(body.fee ?? 0, 'fee');
+        const plainNote = body.note?.trim() || null;
+        const encryptedNote = await encryptSensitiveText(plainNote, userAesKey);
+        const holdingId = existingHolding?.id ?? crypto.randomUUID();
+
+        await env.DB.batch([
+          env.DB.prepare(
+            `INSERT INTO trades (id, user_id, portfolio_id, asset_id, side, quantity, price, fee, date, settlement_account_id, realized_gain, note, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            tradeId,
+            user.id,
+            portfolio.id,
+            asset.id,
+            body.side,
+            body.quantity,
+            body.price,
+            feeCents,
+            body.date,
+            body.settlement_account_id ?? null,
+            execResult.realizedGainCents,
+            encryptedNote,
+            createdAt
+          ),
+          env.DB.prepare(
+            `INSERT INTO holdings (id, user_id, portfolio_id, asset_id, quantity, avg_cost, last_price, last_price_date)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(portfolio_id, asset_id) DO UPDATE SET
+               quantity = excluded.quantity,
+               avg_cost = excluded.avg_cost,
+               last_price = excluded.last_price,
+               last_price_date = excluded.last_price_date`
+          ).bind(
+            holdingId,
+            user.id,
+            portfolio.id,
+            asset.id,
+            execResult.nextQuantity,
+            execResult.nextAvgCostCents,
+            body.price,
+            body.date
+          ),
+        ]);
+
+        return json(
+          {
+            trade: {
+              id: tradeId,
+              user_id: user.id,
+              portfolio_id: portfolio.id,
+              asset_id: asset.id,
+              side: body.side,
+              quantity: body.quantity,
+              price: body.price,
+              fee: feeCents,
+              date: body.date,
+              settlement_account_id: body.settlement_account_id ?? null,
+              realized_gain: execResult.realizedGainCents,
+              note: plainNote,
+              created_at: createdAt,
+            },
+            holding: {
+              id: holdingId,
+              user_id: user.id,
+              portfolio_id: portfolio.id,
+              asset_id: asset.id,
+              quantity: execResult.nextQuantity,
+              avg_cost: execResult.nextAvgCostCents,
+              last_price: body.price,
+              last_price_date: body.date,
+            },
+          },
+          201
+        );
+      }
+
+      // 14. /api/portfolio-incomes (Dividendos e intereses de cartera)
+      if (pathname === '/api/portfolio-incomes' && request.method === 'POST') {
+        const body = (await request.json()) as {
+          portfolio_id: string;
+          asset_id?: string | null;
+          type: PortfolioIncomeType;
+          amount: number;
+          currency: Currency;
+          date: string;
+          note?: string | null;
+        };
+
+        const amount = assertPositiveCents(body.amount, 'amount');
+        const id = crypto.randomUUID();
+        const plainNote = body.note?.trim() || null;
+        const encryptedNote = await encryptSensitiveText(plainNote, userAesKey);
+
+        await env.DB.prepare(
+          `INSERT INTO portfolio_incomes (id, user_id, portfolio_id, asset_id, type, amount, currency, date, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            id,
+            user.id,
+            body.portfolio_id,
+            body.asset_id ?? null,
+            body.type,
+            amount,
+            body.currency,
+            body.date,
+            encryptedNote
+          )
+          .run();
+
+        return json(
+          {
+            income: {
+              id,
+              user_id: user.id,
+              portfolio_id: body.portfolio_id,
+              asset_id: body.asset_id ?? null,
+              type: body.type,
+              amount,
+              currency: body.currency,
+              date: body.date,
+              note: plainNote,
+            },
+          },
+          201
+        );
+      }
+
+      // 15. /api/portfolio-snapshot-drafts (RN-04: Staging obligatorio para capturas de cartera)
+      if (pathname === '/api/portfolio-snapshot-drafts') {
+        if (request.method === 'POST') {
+          const body = (await request.json()) as {
+            portfolio_id: string;
+            raw_text?: string | null;
+            rows: ParsedPortfolioSnapshotRow[];
+          };
+          const id = crypto.randomUUID();
+          const createdAt = Math.floor(Date.now() / 1000);
+          const rawText = body.raw_text ?? null;
+          const encryptedRawText = await encryptSensitiveText(rawText, userAesKey);
+          const rowsJson = JSON.stringify(body.rows);
+
+          await env.DB.prepare(
+            `INSERT INTO portfolio_snapshot_drafts (id, user_id, portfolio_id, raw_text, rows_json, status, created_at)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+          )
+            .bind(id, user.id, body.portfolio_id, encryptedRawText, rowsJson, createdAt)
+            .run();
+
+          return json(
+            {
+              draft: {
+                id,
+                user_id: user.id,
+                portfolio_id: body.portfolio_id,
+                raw_text: rawText,
+                rows_json: rowsJson,
+                status: 'pending',
+                created_at: createdAt,
+              },
+            },
+            201
+          );
+        }
+
+        if (request.method === 'PATCH') {
+          const body = (await request.json()) as {
+            id: string;
+            action: 'confirm' | 'discard';
+            portfolio_id?: string;
+            rows?: Array<{
+              ticker: string;
+              asset_name: string;
+              asset_class: AssetClass;
+              quantity: number;
+              avg_cost: number;
+              last_price: number;
+            }>;
+          };
+
+          if (body.action === 'discard') {
+            await env.DB.prepare(
+              "UPDATE portfolio_snapshot_drafts SET status = 'discarded' WHERE id = ? AND user_id = ?"
+            )
+              .bind(body.id, user.id)
+              .run();
+            return json({ ok: true });
+          }
+
+          const portfolio = await env.DB.prepare(
+            'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.portfolio_id ?? '', user.id)
+            .first<PortfolioRecord>();
+          if (!portfolio) return err('Cartera destino no encontrada.', 404);
+
+          const today = new Date().toISOString().slice(0, 10);
+
+          for (const row of body.rows ?? []) {
+            const ticker = row.ticker.trim().toUpperCase();
+            if (!ticker || row.quantity < 0) continue;
+            const avgCost = assertNonNegativeCents(row.avg_cost, 'avg_cost');
+            const lastPrice = assertNonNegativeCents(row.last_price, 'last_price');
+
+            let asset = await env.DB.prepare('SELECT * FROM assets WHERE ticker = ?')
+              .bind(ticker)
+              .first<AssetRecord>();
+
+            if (!asset) {
+              const newAssetId = crypto.randomUUID();
+              await env.DB.prepare(
+                'INSERT INTO assets (id, ticker, name, asset_class, currency) VALUES (?, ?, ?, ?, ?)'
+              )
+                .bind(
+                  newAssetId,
+                  ticker,
+                  row.asset_name.trim() || `Activo ${ticker}`,
+                  row.asset_class,
+                  portfolio.base_currency
+                )
+                .run();
+              asset = {
+                id: newAssetId,
+                ticker,
+                name: row.asset_name.trim() || `Activo ${ticker}`,
+                asset_class: row.asset_class,
+                currency: portfolio.base_currency,
+              };
+            }
+
+            await env.DB.prepare(
+              `INSERT INTO holdings (id, user_id, portfolio_id, asset_id, quantity, avg_cost, last_price, last_price_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(portfolio_id, asset_id) DO UPDATE SET
+                 quantity = excluded.quantity,
+                 avg_cost = excluded.avg_cost,
+                 last_price = excluded.last_price,
+                 last_price_date = excluded.last_price_date`
+            )
+              .bind(
+                crypto.randomUUID(),
+                user.id,
+                portfolio.id,
+                asset.id,
+                row.quantity,
+                avgCost,
+                lastPrice,
+                today
+              )
+              .run();
+          }
+
+          await env.DB.prepare(
+            "UPDATE portfolio_snapshot_drafts SET status = 'confirmed' WHERE id = ? AND user_id = ?"
+          )
+            .bind(body.id, user.id)
+            .run();
+
+          return json({ ok: true });
+        }
+      }
+
+      // 16. /api/quotes/yahoo (Cotizaciones externas solo para activos en USD, prohibido CEDEARs/ARS)
+      if (pathname === '/api/quotes/yahoo' && request.method === 'POST') {
+        const body = (await request.json()) as { holding_ids?: string[] };
+        const { results: holdings } = await env.DB.prepare(
+          'SELECT * FROM holdings WHERE user_id = ?'
+        )
+          .bind(user.id)
+          .all<HoldingRecord>();
+
+        const { results: assets } = await env.DB.prepare('SELECT * FROM assets').all<AssetRecord>();
+        const assetMap = new Map((assets ?? []).map((a) => [a.id, a]));
+        const today = new Date().toISOString().slice(0, 10);
+
+        const updatedHoldings: HoldingRecord[] = [];
+        const skippedReasons: string[] = [];
+
+        for (const h of holdings ?? []) {
+          if (body.holding_ids && !body.holding_ids.includes(h.id)) continue;
+          const asset = assetMap.get(h.asset_id);
+          if (!asset) continue;
+
+          if (!canAutoQuoteWithYahoo(asset)) {
+            skippedReasons.push(
+              `${asset.ticker}: Prohibido auto-cotizar activos en ARS o CEDEARs desde Yahoo Finance.`
+            );
+            continue;
+          }
+
+          try {
+            const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+              asset.ticker
+            )}?interval=1d&range=1d`;
+            const yRes = await fetch(yahooUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; PatrimonioContable/2.0)',
+                Accept: 'application/json',
+              },
+            });
+            if (!yRes.ok) continue;
+
+            const yData = (await yRes.json()) as {
+              chart?: {
+                result?: Array<{
+                  meta?: { regularMarketPrice?: number };
+                }>;
+              };
+            };
+            const marketPrice = yData.chart?.result?.[0]?.meta?.regularMarketPrice;
+            if (typeof marketPrice === 'number' && marketPrice > 0) {
+              const priceCents = toCents(marketPrice);
+              await env.DB.prepare(
+                'UPDATE holdings SET last_price = ?, last_price_date = ? WHERE id = ? AND user_id = ?'
+              )
+                .bind(priceCents, today, h.id, user.id)
+                .run();
+              updatedHoldings.push({
+                ...h,
+                last_price: priceCents,
+                last_price_date: today,
+              });
+            }
+          } catch {
+            // Si Yahoo Finance no responde para un ticker puntual, continúa con el siguiente
+          }
+        }
+
+        return json({ updatedHoldings, skippedReasons });
       }
     }
 

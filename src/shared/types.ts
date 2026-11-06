@@ -103,3 +103,111 @@ export interface MonthlySummary {
   ARS: MonthlyCurrencySummary;
   USD: MonthlyCurrencySummary;
 }
+
+// === MÓDULO V2: INVERSIONES Y PATRIMONIO ===
+
+export type AssetClass = 'stock' | 'cedear' | 'bond' | 'crypto' | 'fci' | 'other';
+
+export interface PortfolioRecord {
+  id: string;
+  user_id: string;
+  name: string;
+  broker: string | null;
+  base_currency: Currency;
+  created_at: number;
+}
+
+export interface AssetRecord {
+  id: string;
+  ticker: string; // Único en mayúsculas (ej. AAPL, SPY, AL30, GGAL)
+  name: string;
+  asset_class: AssetClass;
+  currency: Currency;
+}
+
+export interface HoldingRecord {
+  id: string;
+  user_id: string;
+  portfolio_id: string;
+  asset_id: string;
+  quantity: number; // REAL >= 0 (admite fracciones ej. FCI o cripto)
+  avg_cost: number; // Centavos enteros >= 0 (RN-06)
+  last_price: number; // Centavos enteros >= 0 (RN-06)
+  last_price_date: string | null;
+}
+
+export interface PortfolioCashRecord {
+  portfolio_id: string;
+  user_id: string;
+  currency: Currency;
+  amount: number; // Centavos enteros >= 0 (RN-06)
+}
+
+export type SnapshotRowUncertainField = 'ticker' | 'quantity' | 'avg_cost' | 'last_price';
+
+export interface ParsedPortfolioSnapshotRow {
+  row_id: string;
+  raw_line: string;
+  ticker: string | null;
+  asset_name: string;
+  asset_class: AssetClass;
+  quantity: number | null;
+  avg_cost: number | null; // Centavos enteros >= 0
+  last_price: number | null; // Centavos enteros >= 0
+  uncertain_fields: SnapshotRowUncertainField[];
+}
+
+export interface PortfolioSnapshotDraftRecord {
+  id: string;
+  user_id: string;
+  portfolio_id: string;
+  raw_text: string | null;
+  rows_json: string; // JSON serializado de ParsedPortfolioSnapshotRow[]
+  status: DraftStatus;
+  created_at: number;
+}
+
+export type TradeSide = 'buy' | 'sell';
+
+export interface TradeRecord {
+  id: string;
+  user_id: string;
+  portfolio_id: string;
+  asset_id: string;
+  side: TradeSide;
+  quantity: number; // REAL > 0
+  price: number; // Centavos enteros > 0 (RN-06)
+  fee: number; // Centavos enteros >= 0 (RN-06)
+  date: string; // YYYY-MM-DD
+  settlement_account_id: string | null; // Solo informativo (RN-02)
+  realized_gain: number | null; // Centavos enteros (calculado en ventas, RN-02)
+  note: string | null;
+  created_at: number;
+}
+
+export type PortfolioIncomeType = 'dividend' | 'interest';
+
+export interface PortfolioIncomeRecord {
+  id: string;
+  user_id: string;
+  portfolio_id: string;
+  asset_id: string | null;
+  type: PortfolioIncomeType;
+  amount: number; // Centavos enteros > 0 (RN-06)
+  currency: Currency;
+  date: string; // YYYY-MM-DD
+  note: string | null;
+}
+
+export interface CurrencyWealthBreakdown {
+  accountsBalance: number; // V1: Saldo de cuentas activas
+  portfoliosMarketValue: number; // V2: Valor de mercado de tenencias
+  portfoliosCash: number; // V2: Efectivo líquido en brokers
+  totalNetWorth: number; // Suma exacta en centavos enteros
+}
+
+export interface TotalWealthSummary {
+  ARS: CurrencyWealthBreakdown;
+  USD: CurrencyWealthBreakdown;
+}
+

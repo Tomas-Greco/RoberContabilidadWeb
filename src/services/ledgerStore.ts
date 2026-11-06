@@ -1,21 +1,33 @@
+import { applyTradeToHolding, canAutoQuoteWithYahoo } from '../shared/investments';
 import { validateTransactionInvariants } from '../shared/ledger';
-import { assertNonNegativeCents } from '../shared/money';
+import { assertNonNegativeCents, assertPositiveCents } from '../shared/money';
 import type {
   AccountRecord,
   AccountType,
+  AssetClass,
+  AssetRecord,
   CategoryKind,
   CategoryRecord,
   Currency,
   DraftSource,
+  HoldingRecord,
   MovementDraftRecord,
   ParsedMovementDraft,
+  ParsedPortfolioSnapshotRow,
+  PortfolioCashRecord,
+  PortfolioIncomeRecord,
+  PortfolioIncomeType,
+  PortfolioRecord,
+  PortfolioSnapshotDraftRecord,
+  TradeRecord,
+  TradeSide,
   TransactionRecord,
   TransactionSource,
   TransactionType,
   UserSession,
 } from '../shared/types';
 
-const LOCAL_STORAGE_KEY = 'patrimonio_local_d1_v1';
+const LOCAL_STORAGE_KEY = 'patrimonio_local_d1_v2';
 
 interface LocalDbState {
   user: UserSession | null;
@@ -23,6 +35,14 @@ interface LocalDbState {
   categories: CategoryRecord[];
   transactions: TransactionRecord[];
   drafts: MovementDraftRecord[];
+  // Módulo V2: Inversiones y Patrimonio
+  portfolios: PortfolioRecord[];
+  assets: AssetRecord[];
+  holdings: HoldingRecord[];
+  portfolioCash: PortfolioCashRecord[];
+  trades: TradeRecord[];
+  portfolioIncomes: PortfolioIncomeRecord[];
+  snapshotDrafts: PortfolioSnapshotDraftRecord[];
 }
 
 function getTodayIso(): string {
@@ -159,12 +179,204 @@ function createSeedState(user: UserSession): LocalDbState {
     },
   ];
 
+  // Datos iniciales de Módulo V2: Inversiones y Patrimonio
+  const portfolios: PortfolioRecord[] = [
+    {
+      id: 'port-iol-ars',
+      user_id: uid,
+      name: 'Cartera Local CEDEARs',
+      broker: 'InvertirOnline (IOL)',
+      base_currency: 'ARS',
+      created_at: now - 86400 * 15,
+    },
+    {
+      id: 'port-ibkr-usd',
+      user_id: uid,
+      name: 'Cartera Global ETFs',
+      broker: 'Interactive Brokers',
+      base_currency: 'USD',
+      created_at: now - 86400 * 14,
+    },
+  ];
+
+  const assets: AssetRecord[] = [
+    {
+      id: 'asset-aapl-cedear',
+      ticker: 'AAPL.BA',
+      name: 'Apple Inc. CEDEAR',
+      asset_class: 'cedear',
+      currency: 'ARS',
+    },
+    {
+      id: 'asset-al30',
+      ticker: 'AL30',
+      name: 'Bono Rep. Argentina Step Up 2030',
+      asset_class: 'bond',
+      currency: 'ARS',
+    },
+    {
+      id: 'asset-spy-usd',
+      ticker: 'SPY',
+      name: 'SPDR S&P 500 ETF Trust',
+      asset_class: 'stock',
+      currency: 'USD',
+    },
+    {
+      id: 'asset-msft-usd',
+      ticker: 'MSFT',
+      name: 'Microsoft Corporation',
+      asset_class: 'stock',
+      currency: 'USD',
+    },
+  ];
+
+  const holdings: HoldingRecord[] = [
+    {
+      id: 'hold-aapl-ars',
+      user_id: uid,
+      portfolio_id: 'port-iol-ars',
+      asset_id: 'asset-aapl-cedear',
+      quantity: 25,
+      avg_cost: 1850000, // $18.500,00
+      last_price: 2140000, // $21.400,00 -> Valuación $535.000,00
+      last_price_date: getTodayIso(),
+    },
+    {
+      id: 'hold-al30-ars',
+      user_id: uid,
+      portfolio_id: 'port-iol-ars',
+      asset_id: 'asset-al30',
+      quantity: 400,
+      avg_cost: 68500, // $685,00
+      last_price: 76200, // $762,00 -> Valuación $304.800,00
+      last_price_date: getTodayIso(),
+    },
+    {
+      id: 'hold-spy-usd',
+      user_id: uid,
+      portfolio_id: 'port-ibkr-usd',
+      asset_id: 'asset-spy-usd',
+      quantity: 4,
+      avg_cost: 51000, // USD 510.00
+      last_price: 58250, // USD 582.50 -> Valuación USD 2,330.00
+      last_price_date: getTodayIso(),
+    },
+    {
+      id: 'hold-msft-usd',
+      user_id: uid,
+      portfolio_id: 'port-ibkr-usd',
+      asset_id: 'asset-msft-usd',
+      quantity: 3,
+      avg_cost: 40500, // USD 405.00
+      last_price: 42800, // USD 428.00 -> Valuación USD 1,284.00
+      last_price_date: getTodayIso(),
+    },
+  ];
+
+  const portfolioCash: PortfolioCashRecord[] = [
+    {
+      portfolio_id: 'port-iol-ars',
+      user_id: uid,
+      currency: 'ARS',
+      amount: 8500000, // $85.000,00 líquido en IOL
+    },
+    {
+      portfolio_id: 'port-ibkr-usd',
+      user_id: uid,
+      currency: 'USD',
+      amount: 34000, // USD 340.00 líquido en IBKR
+    },
+  ];
+
+  const trades: TradeRecord[] = [
+    {
+      id: 'tr-seed-1',
+      user_id: uid,
+      portfolio_id: 'port-iol-ars',
+      asset_id: 'asset-aapl-cedear',
+      side: 'buy',
+      quantity: 25,
+      price: 1840000,
+      fee: 250000,
+      date: shiftDaysIso(-12),
+      settlement_account_id: 'acc-santander',
+      realized_gain: null,
+      note: 'Compra inicial CEDEAR Apple',
+      created_at: now - 86400 * 12,
+    },
+    {
+      id: 'tr-seed-2',
+      user_id: uid,
+      portfolio_id: 'port-ibkr-usd',
+      asset_id: 'asset-spy-usd',
+      side: 'buy',
+      quantity: 4,
+      price: 51000,
+      fee: 0,
+      date: shiftDaysIso(-10),
+      settlement_account_id: 'acc-caja-usd',
+      realized_gain: null,
+      note: 'Posición core S&P 500',
+      created_at: now - 86400 * 10,
+    },
+  ];
+
+  const portfolioIncomes: PortfolioIncomeRecord[] = [
+    {
+      id: 'inc-seed-1',
+      user_id: uid,
+      portfolio_id: 'port-ibkr-usd',
+      asset_id: 'asset-spy-usd',
+      type: 'dividend',
+      amount: 685, // USD 6.85
+      currency: 'USD',
+      date: shiftDaysIso(-5),
+      note: 'Dividendo trimestral SPY',
+    },
+    {
+      id: 'inc-seed-2',
+      user_id: uid,
+      portfolio_id: 'port-iol-ars',
+      asset_id: 'asset-al30',
+      type: 'interest',
+      amount: 1620000, // $16.200,00
+      currency: 'ARS',
+      date: shiftDaysIso(-4),
+      note: 'Cupón renta bono soberano',
+    },
+  ];
+
   return {
     user,
     accounts,
     categories,
     transactions,
     drafts: [],
+    portfolios,
+    assets,
+    holdings,
+    portfolioCash,
+    trades,
+    portfolioIncomes,
+    snapshotDrafts: [],
+  };
+}
+
+function ensureCompleteLocalState(partial: Partial<LocalDbState>, fallbackUser: UserSession): LocalDbState {
+  const seed = createSeedState(fallbackUser);
+  return {
+    user: partial.user ?? fallbackUser,
+    accounts: partial.accounts ?? seed.accounts,
+    categories: partial.categories ?? seed.categories,
+    transactions: partial.transactions ?? seed.transactions,
+    drafts: partial.drafts ?? [],
+    portfolios: partial.portfolios ?? seed.portfolios,
+    assets: partial.assets ?? seed.assets,
+    holdings: partial.holdings ?? seed.holdings,
+    portfolioCash: partial.portfolioCash ?? seed.portfolioCash,
+    trades: partial.trades ?? seed.trades,
+    portfolioIncomes: partial.portfolioIncomes ?? seed.portfolioIncomes,
+    snapshotDrafts: partial.snapshotDrafts ?? [],
   };
 }
 
@@ -172,7 +384,9 @@ function readLocalState(): LocalDbState | null {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as LocalDbState;
+    const parsed = JSON.parse(raw) as Partial<LocalDbState>;
+    if (!parsed.user) return null;
+    return ensureCompleteLocalState(parsed, parsed.user);
   } catch {
     return null;
   }
@@ -205,7 +419,6 @@ async function tryApiFetch<T>(url: string, init?: RequestInit): Promise<ApiFetch
 
     const contentType = res.headers.get('content-type') ?? '';
     if (!contentType.includes('application/json')) {
-      // En Vite dev server sin wrangler pages dev, /api/* devuelve index.html o 404
       isLocalFallbackMode = true;
       return { kind: 'fallback' };
     }
@@ -227,28 +440,67 @@ export interface LedgerSnapshot {
   categories: CategoryRecord[];
   transactions: TransactionRecord[];
   drafts: MovementDraftRecord[];
+  portfolios: PortfolioRecord[];
+  assets: AssetRecord[];
+  holdings: HoldingRecord[];
+  portfolioCash: PortfolioCashRecord[];
+  trades: TradeRecord[];
+  portfolioIncomes: PortfolioIncomeRecord[];
+  snapshotDrafts: PortfolioSnapshotDraftRecord[];
 }
+
+const EMPTY_SNAPSHOT: LedgerSnapshot = {
+  user: null,
+  accounts: [],
+  categories: [],
+  transactions: [],
+  drafts: [],
+  portfolios: [],
+  assets: [],
+  holdings: [],
+  portfolioCash: [],
+  trades: [],
+  portfolioIncomes: [],
+  snapshotDrafts: [],
+};
 
 export const ledgerStore = {
   async loadAll(): Promise<LedgerSnapshot> {
+    const bootRes = await tryApiFetch<LedgerSnapshot>('/api/bootstrap');
+    if (bootRes.kind === 'ok' && bootRes.data.user) {
+      return bootRes.data;
+    }
+    if (bootRes.kind === 'error' && bootRes.status === 401) {
+      return EMPTY_SNAPSHOT;
+    }
+
     const meRes = await tryApiFetch<{ user: UserSession | null }>('/api/auth/me');
     if (meRes.kind === 'fallback') {
       const local = readLocalState();
       if (!local || !local.user) {
-        return { user: null, accounts: [], categories: [], transactions: [], drafts: [] };
+        return EMPTY_SNAPSHOT;
       }
       return local;
     }
 
     if (meRes.kind !== 'ok' || !meRes.data.user) {
-      return { user: null, accounts: [], categories: [], transactions: [], drafts: [] };
+      return EMPTY_SNAPSHOT;
     }
 
-    const [accRes, catRes, txRes, draftRes] = await Promise.all([
+    const [accRes, catRes, txRes, draftRes, invRes] = await Promise.all([
       tryApiFetch<{ accounts: AccountRecord[] }>('/api/accounts'),
       tryApiFetch<{ categories: CategoryRecord[] }>('/api/categories'),
       tryApiFetch<{ transactions: TransactionRecord[] }>('/api/transactions'),
       tryApiFetch<{ drafts: MovementDraftRecord[] }>('/api/drafts'),
+      tryApiFetch<{
+        portfolios: PortfolioRecord[];
+        assets: AssetRecord[];
+        holdings: HoldingRecord[];
+        portfolioCash: PortfolioCashRecord[];
+        trades: TradeRecord[];
+        portfolioIncomes: PortfolioIncomeRecord[];
+        snapshotDrafts: PortfolioSnapshotDraftRecord[];
+      }>('/api/investments'),
     ]);
 
     return {
@@ -257,6 +509,13 @@ export const ledgerStore = {
       categories: catRes.kind === 'ok' ? catRes.data.categories : [],
       transactions: txRes.kind === 'ok' ? txRes.data.transactions : [],
       drafts: draftRes.kind === 'ok' ? draftRes.data.drafts : [],
+      portfolios: invRes.kind === 'ok' ? invRes.data.portfolios : [],
+      assets: invRes.kind === 'ok' ? invRes.data.assets : [],
+      holdings: invRes.kind === 'ok' ? invRes.data.holdings : [],
+      portfolioCash: invRes.kind === 'ok' ? invRes.data.portfolioCash : [],
+      trades: invRes.kind === 'ok' ? invRes.data.trades : [],
+      portfolioIncomes: invRes.kind === 'ok' ? invRes.data.portfolioIncomes : [],
+      snapshotDrafts: invRes.kind === 'ok' ? invRes.data.snapshotDrafts : [],
     };
   },
 
@@ -267,7 +526,6 @@ export const ledgerStore = {
     });
 
     if (res.kind === 'fallback') {
-      // Decodificar payload del JWT de Google en modo local preview
       const payloadPart = credential.split('.')[1];
       const decoded = JSON.parse(atob(payloadPart.replace(/-/g, '+').replace(/_/g, '/'))) as {
         sub: string;
@@ -552,5 +810,473 @@ export const ledgerStore = {
     }
 
     if (res.kind === 'error') throw new Error(res.error);
+  },
+
+  // === MÉTODOS V2: INVERSIONES Y PATRIMONIO ===
+
+  async createPortfolio(input: {
+    name: string;
+    broker: string | null;
+    base_currency: Currency;
+  }): Promise<PortfolioRecord> {
+    const res = await tryApiFetch<{ portfolio: PortfolioRecord }>('/api/portfolios', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const portfolio: PortfolioRecord = {
+        id: crypto.randomUUID(),
+        user_id: state.user.id,
+        name: input.name.trim(),
+        broker: input.broker?.trim() || null,
+        base_currency: input.base_currency,
+        created_at: Math.floor(Date.now() / 1000),
+      };
+      const initialCash: PortfolioCashRecord = {
+        portfolio_id: portfolio.id,
+        user_id: state.user.id,
+        currency: portfolio.base_currency,
+        amount: 0,
+      };
+      writeLocalState({
+        ...state,
+        portfolios: [...state.portfolios, portfolio],
+        portfolioCash: [...state.portfolioCash, initialCash],
+      });
+      return portfolio;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.portfolio;
+  },
+
+  async createAsset(input: {
+    ticker: string;
+    name: string;
+    asset_class: AssetClass;
+    currency: Currency;
+  }): Promise<AssetRecord> {
+    const ticker = input.ticker.trim().toUpperCase();
+    const res = await tryApiFetch<{ asset: AssetRecord }>('/api/assets', {
+      method: 'POST',
+      body: JSON.stringify({ ...input, ticker }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const existing = state.assets.find((a) => a.ticker.toUpperCase() === ticker);
+      if (existing) return existing;
+
+      const asset: AssetRecord = {
+        id: crypto.randomUUID(),
+        ticker,
+        name: input.name.trim() || `Activo ${ticker}`,
+        asset_class: input.asset_class,
+        currency: input.currency,
+      };
+      writeLocalState({
+        ...state,
+        assets: [...state.assets, asset],
+      });
+      return asset;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.asset;
+  },
+
+  async updateHoldingPrice(input: {
+    id: string;
+    last_price: number;
+    last_price_date?: string;
+  }): Promise<HoldingRecord> {
+    const lastPrice = assertNonNegativeCents(input.last_price, 'last_price');
+    const dateStr = input.last_price_date || getTodayIso();
+    const res = await tryApiFetch<{ holding: HoldingRecord }>('/api/holdings', {
+      method: 'PATCH',
+      body: JSON.stringify({ id: input.id, last_price: lastPrice, last_price_date: dateStr }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      let updated: HoldingRecord | null = null;
+      const holdings = state.holdings.map((h) => {
+        if (h.id === input.id) {
+          updated = { ...h, last_price: lastPrice, last_price_date: dateStr };
+          return updated;
+        }
+        return h;
+      });
+      if (!updated) throw new Error('Tenencia no encontrada.');
+      writeLocalState({ ...state, holdings });
+      return updated;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.holding;
+  },
+
+  async updatePortfolioCash(input: {
+    portfolio_id: string;
+    currency: Currency;
+    amount: number;
+  }): Promise<PortfolioCashRecord> {
+    const amountCents = assertNonNegativeCents(input.amount, 'portfolio_cash');
+    const res = await tryApiFetch<{ cash: PortfolioCashRecord }>('/api/portfolio-cash', {
+      method: 'PUT',
+      body: JSON.stringify({ ...input, amount: amountCents }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const cashRecord: PortfolioCashRecord = {
+        portfolio_id: input.portfolio_id,
+        user_id: state.user.id,
+        currency: input.currency,
+        amount: amountCents,
+      };
+      const exists = state.portfolioCash.some(
+        (c) => c.portfolio_id === input.portfolio_id && c.currency === input.currency
+      );
+      const portfolioCash = exists
+        ? state.portfolioCash.map((c) =>
+            c.portfolio_id === input.portfolio_id && c.currency === input.currency ? cashRecord : c
+          )
+        : [...state.portfolioCash, cashRecord];
+
+      writeLocalState({ ...state, portfolioCash });
+      return cashRecord;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.cash;
+  },
+
+  /**
+   * RN-02: Registra una compra o venta de activos recalculando avg_cost o realized_gain.
+   * Separación estricta: NO crea ni modifica filas en 'transactions' de V1; settlement_account_id es informativo.
+   */
+  async recordTrade(input: {
+    portfolio_id: string;
+    asset_id: string;
+    side: TradeSide;
+    quantity: number;
+    price: number;
+    fee: number;
+    date: string;
+    settlement_account_id: string | null;
+    note: string | null;
+  }): Promise<{ trade: TradeRecord; holding: HoldingRecord }> {
+    const res = await tryApiFetch<{ trade: TradeRecord; holding: HoldingRecord }>('/api/trades', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const existingHolding = state.holdings.find(
+        (h) => h.portfolio_id === input.portfolio_id && h.asset_id === input.asset_id
+      );
+
+      const execResult = applyTradeToHolding({
+        currentQuantity: existingHolding?.quantity ?? 0,
+        currentAvgCostCents: existingHolding?.avg_cost ?? 0,
+        side: input.side,
+        tradeQuantity: input.quantity,
+        tradePriceCents: input.price,
+        feeCents: input.fee,
+      });
+
+      const trade: TradeRecord = {
+        id: crypto.randomUUID(),
+        user_id: state.user.id,
+        portfolio_id: input.portfolio_id,
+        asset_id: input.asset_id,
+        side: input.side,
+        quantity: input.quantity,
+        price: input.price,
+        fee: assertNonNegativeCents(input.fee, 'fee'),
+        date: input.date,
+        settlement_account_id: input.settlement_account_id,
+        realized_gain: execResult.realizedGainCents,
+        note: input.note?.trim() || null,
+        created_at: Math.floor(Date.now() / 1000),
+      };
+
+      const holding: HoldingRecord = {
+        id: existingHolding?.id ?? crypto.randomUUID(),
+        user_id: state.user.id,
+        portfolio_id: input.portfolio_id,
+        asset_id: input.asset_id,
+        quantity: execResult.nextQuantity,
+        avg_cost: execResult.nextAvgCostCents,
+        last_price: input.price,
+        last_price_date: input.date,
+      };
+
+      const holdings = existingHolding
+        ? state.holdings.map((h) => (h.id === existingHolding.id ? holding : h))
+        : [...state.holdings, holding];
+
+      writeLocalState({
+        ...state,
+        trades: [trade, ...state.trades],
+        holdings,
+      });
+      return { trade, holding };
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data;
+  },
+
+  async createPortfolioIncome(input: {
+    portfolio_id: string;
+    asset_id: string | null;
+    type: PortfolioIncomeType;
+    amount: number;
+    currency: Currency;
+    date: string;
+    note: string | null;
+  }): Promise<PortfolioIncomeRecord> {
+    const amount = assertPositiveCents(input.amount, 'amount');
+    const res = await tryApiFetch<{ income: PortfolioIncomeRecord }>('/api/portfolio-incomes', {
+      method: 'POST',
+      body: JSON.stringify({ ...input, amount }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const income: PortfolioIncomeRecord = {
+        id: crypto.randomUUID(),
+        user_id: state.user.id,
+        portfolio_id: input.portfolio_id,
+        asset_id: input.asset_id,
+        type: input.type,
+        amount,
+        currency: input.currency,
+        date: input.date,
+        note: input.note?.trim() || null,
+      };
+      writeLocalState({
+        ...state,
+        portfolioIncomes: [income, ...state.portfolioIncomes],
+      });
+      return income;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.income;
+  },
+
+  async createSnapshotDraft(input: {
+    portfolio_id: string;
+    raw_text: string;
+    rows: ParsedPortfolioSnapshotRow[];
+  }): Promise<PortfolioSnapshotDraftRecord> {
+    const res = await tryApiFetch<{ draft: PortfolioSnapshotDraftRecord }>(
+      '/api/portfolio-snapshot-drafts',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }
+    );
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const draft: PortfolioSnapshotDraftRecord = {
+        id: crypto.randomUUID(),
+        user_id: state.user.id,
+        portfolio_id: input.portfolio_id,
+        raw_text: input.raw_text,
+        rows_json: JSON.stringify(input.rows),
+        status: 'pending',
+        created_at: Math.floor(Date.now() / 1000),
+      };
+      writeLocalState({
+        ...state,
+        snapshotDrafts: [draft, ...state.snapshotDrafts],
+      });
+      return draft;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.draft;
+  },
+
+  async confirmSnapshotDraft(input: {
+    draft_id: string;
+    portfolio_id: string;
+    rows: Array<{
+      ticker: string;
+      asset_name: string;
+      asset_class: AssetClass;
+      quantity: number;
+      avg_cost: number;
+      last_price: number;
+    }>;
+  }): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/portfolio-snapshot-drafts', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        id: input.draft_id,
+        action: 'confirm',
+        portfolio_id: input.portfolio_id,
+        rows: input.rows,
+      }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const portfolio = state.portfolios.find((p) => p.id === input.portfolio_id);
+      if (!portfolio) throw new Error('Cartera destino no encontrada.');
+
+      const nextAssets = [...state.assets];
+      const nextHoldings = [...state.holdings];
+      const today = getTodayIso();
+
+      for (const row of input.rows) {
+        const ticker = row.ticker.trim().toUpperCase();
+        if (!ticker || row.quantity < 0) continue;
+        const avgCost = assertNonNegativeCents(row.avg_cost, 'avg_cost');
+        const lastPrice = assertNonNegativeCents(row.last_price, 'last_price');
+
+        let asset = nextAssets.find((a) => a.ticker.toUpperCase() === ticker);
+        if (!asset) {
+          asset = {
+            id: crypto.randomUUID(),
+            ticker,
+            name: row.asset_name.trim() || `Activo ${ticker}`,
+            asset_class: row.asset_class,
+            currency: portfolio.base_currency,
+          };
+          nextAssets.push(asset);
+        }
+
+        const existingIdx = nextHoldings.findIndex(
+          (h) => h.portfolio_id === portfolio.id && h.asset_id === asset!.id
+        );
+        const holdingRecord: HoldingRecord = {
+          id: existingIdx >= 0 ? nextHoldings[existingIdx].id : crypto.randomUUID(),
+          user_id: state.user.id,
+          portfolio_id: portfolio.id,
+          asset_id: asset.id,
+          quantity: row.quantity,
+          avg_cost: avgCost,
+          last_price: lastPrice,
+          last_price_date: today,
+        };
+
+        if (existingIdx >= 0) {
+          nextHoldings[existingIdx] = holdingRecord;
+        } else {
+          nextHoldings.push(holdingRecord);
+        }
+      }
+
+      writeLocalState({
+        ...state,
+        assets: nextAssets,
+        holdings: nextHoldings,
+        snapshotDrafts: state.snapshotDrafts.filter((d) => d.id !== input.draft_id),
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+  },
+
+  async discardSnapshotDraft(draftId: string): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/portfolio-snapshot-drafts', {
+      method: 'PATCH',
+      body: JSON.stringify({ id: draftId, action: 'discard' }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) return;
+      writeLocalState({
+        ...state,
+        snapshotDrafts: state.snapshotDrafts.filter((d) => d.id !== draftId),
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+  },
+
+  /**
+   * Actualiza cotizaciones externas desde Yahoo Finance ÚNICAMENTE para activos en USD (no CEDEARs).
+   */
+  async refreshUsdQuotesFromYahoo(
+    holdingIds?: string[]
+  ): Promise<{ updatedCount: number; skippedReasons: string[] }> {
+    const res = await tryApiFetch<{
+      updatedHoldings: HoldingRecord[];
+      skippedReasons: string[];
+    }>('/api/quotes/yahoo', {
+      method: 'POST',
+      body: JSON.stringify({ holding_ids: holdingIds }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const assetMap = new Map(state.assets.map((a) => [a.id, a]));
+      const today = getTodayIso();
+      let updatedCount = 0;
+      const skippedReasons: string[] = [];
+
+      const simulatedUsdQuotesCents: Record<string, number> = {
+        SPY: 58640, // USD 586.40
+        MSFT: 43215, // USD 432.15
+        AAPL: 22980, // USD 229.80
+        QQQ: 50420, // USD 504.20
+        NVDA: 13850, // USD 138.50
+        GOOGL: 18290, // USD 182.90
+        AMZN: 21040, // USD 210.40
+        MELI: 204500, // USD 2,045.00
+      };
+
+      const holdings = state.holdings.map((h) => {
+        if (holdingIds && !holdingIds.includes(h.id)) return h;
+        const asset = assetMap.get(h.asset_id);
+        if (!asset) return h;
+
+        if (!canAutoQuoteWithYahoo(asset)) {
+          skippedReasons.push(
+            `${asset.ticker}: Prohibido auto-cotizar CEDEARs o activos en ARS con Yahoo Finance.`
+          );
+          return h;
+        }
+
+        const nextPrice = simulatedUsdQuotesCents[asset.ticker] ?? Math.round(h.last_price * 1.01);
+        updatedCount++;
+        return {
+          ...h,
+          last_price: nextPrice,
+          last_price_date: today,
+        };
+      });
+
+      writeLocalState({ ...state, holdings });
+      return { updatedCount, skippedReasons };
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return {
+      updatedCount: res.data.updatedHoldings.length,
+      skippedReasons: res.data.skippedReasons,
+    };
   },
 };

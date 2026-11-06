@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { Moon, ShieldCheck, Sun } from 'lucide-react';
 
 interface LoginScreenProps {
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
   onGoogleCredential: (credential: string) => Promise<void>;
   onDemoLogin: () => Promise<void>;
 }
@@ -25,7 +27,12 @@ declare global {
   }
 }
 
-export function LoginScreen({ onGoogleCredential, onDemoLogin }: LoginScreenProps) {
+export function LoginScreen({
+  theme,
+  onToggleTheme,
+  onGoogleCredential,
+  onDemoLogin,
+}: LoginScreenProps) {
   const googleBtnRef = useRef<HTMLDivElement | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -60,7 +67,7 @@ export function LoginScreen({ onGoogleCredential, onDemoLogin }: LoginScreenProp
           },
         });
         window.google.accounts.id.renderButton(googleBtnRef.current, {
-          theme: 'outline',
+          theme: theme === 'dark' ? 'filled_black' : 'outline',
           size: 'large',
           width: 320,
           text: 'signin_with',
@@ -72,7 +79,7 @@ export function LoginScreen({ onGoogleCredential, onDemoLogin }: LoginScreenProp
     return () => {
       document.head.removeChild(script);
     };
-  }, [googleClientId, onGoogleCredential]);
+  }, [googleClientId, onGoogleCredential, theme]);
 
   const handleDemo = async () => {
     setError(null);
@@ -88,18 +95,37 @@ export function LoginScreen({ onGoogleCredential, onDemoLogin }: LoginScreenProp
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center px-4 py-12">
-      <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-8">
-        <div className="flex items-center gap-2.5 text-slate-900 mb-6">
-          <ShieldCheck className="w-6 h-6 text-slate-900" aria-hidden="true" />
-          <span className="text-xl font-bold tracking-tight">Patrimonio</span>
+      <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-8 shadow-sm">
+        <div className="flex items-center justify-between gap-2.5 text-slate-900 mb-6">
+          <div className="flex items-center gap-2.5">
+            <ShieldCheck className="w-6 h-6 text-indigo-600" aria-hidden="true" />
+            <span className="text-xl font-bold tracking-tight">Patrimonio</span>
+          </div>
+          <button
+            type="button"
+            onClick={onToggleTheme}
+            className="btn-secondary py-1.5 px-3 text-xs"
+          >
+            {theme === 'dark' ? (
+              <>
+                <Sun className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                <span>Modo Claro</span>
+              </>
+            ) : (
+              <>
+                <Moon className="w-3.5 h-3.5 text-indigo-600" aria-hidden="true" />
+                <span>Modo Oscuro</span>
+              </>
+            )}
+          </button>
         </div>
 
         <h1 className="text-2xl font-semibold text-slate-900 tracking-tight mb-2">
           Contabilidad personal e inversiones
         </h1>
         <p className="text-sm text-slate-600 leading-relaxed mb-6">
-          Libro diario bimonetario en ARS y USD, carga rápida determinística con revisión en
-          staging y exportación nativa a Excel.
+          Libro diario bimonetario en ARS y USD, seguimiento de carteras de inversión, carga rápida
+          con revisión en staging y exportación nativa a Excel.
         </p>
 
         {error && (
@@ -119,7 +145,7 @@ export function LoginScreen({ onGoogleCredential, onDemoLogin }: LoginScreenProp
           type="button"
           onClick={handleDemo}
           disabled={loading}
-          className="w-full py-2.5 px-4 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:opacity-50 transition-colors cursor-pointer"
+          className="btn-primary w-full py-2.5 px-4 text-sm disabled:opacity-50"
         >
           {loading ? 'Ingresando...' : 'Ingresar con cuenta de demostración'}
         </button>

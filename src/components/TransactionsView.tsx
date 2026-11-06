@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { Ban, Download, Search } from 'lucide-react';
-import { exportLedgerToExcel } from '../services/excelExport';
 import { formatMoney } from '../shared/money';
 import type {
   AccountRecord,
@@ -98,8 +97,11 @@ export function TransactionsView({
 
         <button
           type="button"
-          onClick={() => exportLedgerToExcel(accounts, categories, transactions)}
-          className="inline-flex items-center gap-2 py-2 px-4 rounded-lg border border-slate-200 bg-white text-slate-900 text-sm font-medium hover:bg-slate-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          onClick={async () => {
+            const { exportLedgerToExcel } = await import('../services/excelExport');
+            await exportLedgerToExcel(accounts, categories, transactions);
+          }}
+          className="btn-secondary py-2 px-4 text-sm whitespace-nowrap shrink-0"
         >
           <Download className="w-4 h-4" aria-hidden="true" />
           <span>Exportar Excel (.xlsx)</span>
@@ -245,7 +247,7 @@ export function TransactionsView({
                             disabled={voidingId === tx.id}
                             onClick={() => handleVoid(tx.id)}
                             aria-label={`Anular movimiento del ${tx.date}`}
-                            className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-red-700 cursor-pointer disabled:opacity-50"
+                            className="btn-danger-soft py-1 px-2.5 text-xs disabled:opacity-50"
                           >
                             <Ban className="w-3.5 h-3.5" aria-hidden="true" />
                             <span>Anular</span>

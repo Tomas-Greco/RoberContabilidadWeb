@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "vite build",
+    "build": "NODE_ENV=production vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "test": "tsx src/shared/encryption.test.ts && tsx src/shared/core.test.ts",
+    "test": "tsx src/shared/encryption.test.ts && tsx src/shared/core.test.ts && tsx src/shared/investments.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -142,12 +142,12 @@ export function QuickCaptureView({
 
       {/* Panel de Entrada */}
       <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-        <div className="inline-flex p-1 bg-slate-100 rounded-lg">
+        <div className="inline-flex gap-1.5 p-1 bg-slate-100 border border-slate-200 rounded-xl">
           <button
             type="button"
             onClick={() => setMode('nlp')}
-            className={`inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-              mode === 'nlp' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+            className={`inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
+              mode === 'nlp' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-700 hover:bg-white'
             }`}
           >
             <FileText className="w-3.5 h-3.5" aria-hidden="true" />
@@ -156,8 +156,8 @@ export function QuickCaptureView({
           <button
             type="button"
             onClick={() => setMode('capture')}
-            className={`inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-              mode === 'capture' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+            className={`inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
+              mode === 'capture' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-700 hover:bg-white'
             }`}
           >
             <ImageIcon className="w-3.5 h-3.5" aria-hidden="true" />
@@ -183,7 +183,7 @@ export function QuickCaptureView({
                 <button
                   type="submit"
                   disabled={analyzing || !textInput.trim()}
-                  className="py-2.5 px-5 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                  className="btn-primary py-2.5 px-5 text-sm disabled:opacity-50 whitespace-nowrap"
                 >
                   {analyzing ? 'Analizando...' : 'Analizar a Borrador'}
                 </button>
@@ -191,13 +191,13 @@ export function QuickCaptureView({
             </div>
 
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <span className="text-xs text-slate-500">Ejemplos:</span>
+              <span className="text-xs font-medium text-slate-500">Ejemplos rápidos:</span>
               {EXAMPLE_PHRASES.map((phrase) => (
                 <button
                   key={phrase}
                   type="button"
                   onClick={() => setTextInput(phrase)}
-                  className="text-xs px-2.5 py-1 rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                  className="btn-accent-soft text-xs px-2.5 py-1"
                 >
                   {phrase}
                 </button>
@@ -449,7 +449,7 @@ function DraftReviewCard({
               <button
                 type="button"
                 onClick={() => setDate(new Date().toISOString().slice(0, 10))}
-                className="text-xs font-medium text-slate-700 underline cursor-pointer"
+                className="btn-accent-soft py-0.5 px-2 text-[11px]"
               >
                 Usar hoy
               </button>
@@ -584,7 +584,7 @@ function DraftReviewCard({
         <button
           type="button"
           onClick={() => onDiscard(draft.id)}
-          className="inline-flex items-center gap-1.5 py-2 px-3.5 rounded-lg border border-slate-200 text-xs font-medium text-slate-600 hover:text-red-700 hover:border-red-200 cursor-pointer"
+          className="btn-danger-soft py-2 px-3.5 text-xs"
         >
           <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
           <span>Descartar</span>
@@ -592,7 +592,7 @@ function DraftReviewCard({
         <button
           type="submit"
           disabled={submitting}
-          className="inline-flex items-center gap-1.5 py-2 px-4 rounded-lg bg-slate-900 text-white text-xs font-medium hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+          className="btn-primary py-2 px-4 text-xs disabled:opacity-50"
         >
           <Check className="w-3.5 h-3.5" aria-hidden="true" />
           <span>{submitting ? 'Confirmando...' : 'Confirmar Movimiento'}</span>

@@ -1,5 +1,3 @@
-import { createWorker } from 'tesseract.js';
-
 export interface OcrResult {
   text: string;
   confidence: number;
@@ -8,12 +6,13 @@ export interface OcrResult {
 /**
  * Ejecuta OCR 100% en el navegador del cliente usando Tesseract.js (WebAssembly)
  * con paquete de idioma español ('spa').
- * Si falla o no puede inicializar, lanza un error controlado para degradar a carga manual.
+ * Carga el motor bajo demanda (dynamic import) solo cuando el usuario sube una captura.
  */
 export async function runBrowserOcr(
   imageFile: File,
   onProgress?: (progressPct: number) => void
 ): Promise<OcrResult> {
+  const { createWorker } = await import('tesseract.js');
   const worker = await createWorker('spa', 1, {
     logger: (m) => {
       if (m.status === 'recognizing text' && typeof m.progress === 'number' && onProgress) {
