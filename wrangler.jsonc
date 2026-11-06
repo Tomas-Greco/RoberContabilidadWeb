@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "patrimonio-contable",
+  "compatibility_date": "2025-02-04",
+  "pages_build_output_dir": "dist",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "patrimonio_db",
+      "database_id": "67c760b7-73a6-4b15-bb8d-aac7263b8ef0",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "GOOGLE_CLIENT_ID": "1000204276828-dfpdv7cfnske1hctbbecivnc0icqqjbf.apps.googleusercontent.com",
+    "SESSION_SECRET": ""
+  }
+}
