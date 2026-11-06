@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "patrimonio-contable",
+  "name": "robercontabilidadweb",
   "compatibility_date": "2025-02-04",
   "pages_build_output_dir": "dist",
   "d1_databases": [
