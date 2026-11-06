@@ -7,12 +7,12 @@
     {
       "binding": "DB",
       "database_name": "patrimonio_db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "67c760b7-73a6-4b15-bb8d-aac7263b8ef0",
       "migrations_dir": "migrations"
     }
   ],
   "vars": {
-    "GOOGLE_CLIENT_ID": "",
+    "GOOGLE_CLIENT_ID": "1000204276828-dfpdv7cfnske1hctbbecivnc0icqqjbf.apps.googleusercontent.com",
     "SESSION_SECRET": ""
   }
 }
