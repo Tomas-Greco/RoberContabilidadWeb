@@ -1,0 +1,309 @@
+================================================================================
+ESPECIFICACIÓN TÉCNICA Y CONTEXTO DE ARQUITECTURA
+ADMINISTRADOR DE CONTABILIDAD PERSONAL, PATRIMONIO E INVERSIONES (WEB / EDGE)
+================================================================================
+
+1. OBJETIVO DEL SISTEMA Y FILOSOFÍA DE PRODUCTO
+--------------------------------------------------------------------------------
+Aplicación web progresiva (PWA) de contabilidad personal, seguimiento patrimonial y gestión de carteras de inversión. 
+Nació como una idea local en Python/Flask y se rediseña como una aplicación web alojada en Cloudflare Pages + Cloudflare D1 para garantizar accesibilidad remota desde PC y celular en cualquier red, manteniendo la premisa innegociable de COSTO OPERATIVO $0 (sin servidores pagos, sin APIs externas pagas y sin motores de IA en producción).
+
+El sistema es multiusuario con aislamiento estricto de datos mediante inicio de sesión con Google (cada cuenta de Google ve y administra únicamente su propia contabilidad) y permite exportar toda la información a Excel (.xlsx).
+
+Se estructura en 3 versiones evolutivas (V1: Contabilidad, V2: Inversiones, V3: Automatización y Análisis).
+
+2. PRINCIPIOS CONTABLES INNEGOCIABLES (REGLAS DE DOMINIO)
+--------------------------------------------------------------------------------
+RN-01 (Transferencias Neutras): 
+  Una transferencia entre cuentas propias NO es ingreso ni gasto. En la base de datos se registra como UNA SOLA FILA (account_id = origen, counter_account_id = destino), nunca como dos filas separadas, evitando duplicaciones en filtros o cálculos.
+
+RN-02 (Contabilidad de Inversiones): 
+  Comprar un activo financiero no es un gasto de consumo; venderlo no es ganancia bruta total. Solo la diferencia entre el precio de venta y el Costo Promedio Ponderado (PPP / avg_cost) constituye resultado realizado. Al vender parcialmente, el costo promedio de las unidades restantes NO cambia.
+
+RN-03 (Segregación Estricta de Monedas): 
+  No se mezclan ni convierten monedas en ningún total o dashboard. ARS y USD se calculan y exponen siempre en columnas/tarjetas separadas. Cada cuenta tiene una única moneda fija asignada en su creación.
+
+RN-04 (Confirmación Obligatoria en Staging): 
+  Nada toca las tablas definitivas (transactions o holdings) sin confirmación explícita del usuario. La carga rápida por texto libre, el OCR de comprobantes, la reconstrucción de cartera por captura y la importación de CSV pasan obligatoriamente por tablas/estados de borrador (drafts) y una pantalla de revisión editable.
+
+RN-05 (Cero Invención de Datos): 
+  Si un parser determinístico (texto, OCR o CSV) no puede determinar con certeza una fecha, un ticker, un monto o una cuenta, el campo se deja vacío y marcado como incierto (uncertain_fields) para que el usuario lo complete en la revisión. Nunca se rellena con suposiciones.
+
+RN-06 (Aritmética Exacta en Centavos Enteros y Regla del Cero): 
+  Para evitar errores de redondeo de coma flotante IEEE 754 en JavaScript y SQLite, todos los importes monetarios se almacenan y operan en CENTAVOS ENTEROS (INTEGER). 
+  IMPORTANTE: No usar la misma función validadora para todo. Los montos de transacciones (transactions.amount) deben ser estrictamente > 0, mientras que el efectivo de cartera (portfolio_cash), saldos iniciales (opening_balance) y costos promedio (avg_cost) pueden ser legítimamente >= 0 (ej. $0,00 de efectivo o activos recibidos sin costo).
+
+RN-07 (Inmutabilidad y Anulación): 
+  Las transacciones nunca se borran físicamente (DELETE). Se anulan registrando un timestamp en 'voided_at', lo que revierte su impacto en el saldo preservando la trazabilidad histórica.
+
+RN-08 (Saldo Calculado por Función Única): 
+  Nunca se guarda una columna de saldo cacheado en las cuentas que pueda desincronizarse. Todo el sistema (dashboard, listado de cuentas, conciliación) calcula el saldo mediante una única lógica centralizada a partir de 'opening_balance' y las transacciones no anuladas.
+
+3. STACK TECNOLÓGICO (100% GRATUito, SIN IA EN RUNTIME)
+--------------------------------------------------------------------------------
+- Frontend: React 18+ con TypeScript y Vite, estilizado con Tailwind CSS.
+- Backend / API: Cloudflare Pages Functions (TypeScript sobre V8 Workers).
+- Base de Datos: Cloudflare D1 (SQLite serverless en el borde).
+- Autenticación: Google Identity Services (OAuth 2.0). Validación del ID Token de Google en el backend y emisión de cookie de sesión firmada (HttpOnly, Secure, SameSite=Strict).
+- Parser de Lenguaje Natural (Sin IA): Motor determinístico en TypeScript basado en expresiones regulares y reglas léxicas en español ("gasté 1500 en comida con Efectivo").
+- OCR de Capturas (Sin IA / Sin Binarios de Servidor): Tesseract.js (WebAssembly) ejecutado 100% en el navegador del cliente con paquete de idioma español ('spa'). Si falla, no carga o el usuario lo omite, degrada limpiamente a carga manual.
+- Exportación a Excel: Generación en el navegador del cliente mediante SheetJS (xlsx) o ExcelJS, descargando un archivo .xlsx nativo sin consumir CPU del servidor.
+- Cotizaciones Externas: Endpoint público de Yahoo Finance invocado desde Pages Functions únicamente para activos en USD. Prohibido auto-cotizar CEDEARs o activos en ARS a partir del subyacente en USD (debido a ratios de conversión y tipo de cambio CCL variable).
+
+4. ALCANCE FUNCIONAL POR VERSIÓN
+--------------------------------------------------------------------------------
+VERSIÓN 1 — Contabilidad Personal (MVP):
+- Cuentas (efectivo, banco, billetera, otra) con moneda única (ARS o USD).
+- Categorías de ingreso y gasto (con soporte de subcategorías vía parent_id).
+- Movimientos: ingreso, gasto, transferencia (1 sola fila). Alta, edición y anulación (voided_at).
+- Historial global multicriterio (fecha, cuenta, categoría, moneda, tipo).
+- Dashboard bimonetario: saldos por cuenta, consolidado en ARS y USD, ingresos/gastos del mes.
+- Carga rápida por texto libre: parser determinístico en TS -> borrador en revisión -> confirmar.
+- Carga rápida por captura: imagen de comprobante -> OCR en navegador (Tesseract.js) -> borrador en revisión -> confirmar.
+- Detección de posibles duplicados: alerta antes de confirmar si existe otro movimiento activo con mismo importe, cuenta y moneda en una ventana de +-2 días.
+- Exportación a Excel (.xlsx) de saldos y movimientos.
+
+VERSIÓN 2 — Inversiones y Patrimonio:
+- Carteras independientes (nombre, broker en texto libre, moneda base).
+- Maestro de activos (ticker único, nombre, clase, moneda).
+- Tenencias (holdings): cantidad, costo promedio ponderado (avg_cost) y último precio conocido.
+- Dos vías de carga de tenencias:
+  1. Reconstrucción desde captura de portafolio del broker (OCR fila por fila -> tabla editable de revisión -> confirmación en bloque).
+  2. Operación por operación (trades de compra/venta): recalcula automáticamente el avg_cost en compras y el resultado realizado (realized_gain) en ventas.
+- Separación estricta: las operaciones de cartera (trades) NO crean ni modifican movimientos en la tabla 'transactions' de V1. 'settlement_account_id' es solo informativo.
+- Registro separado de dividendos e intereses (portfolio_incomes) y efectivo líquido en el broker (portfolio_cash).
+- Patrimonio total en dashboard = Saldo de Cuentas (V1) + Valor de Mercado de Carteras + Efectivo de Carteras (V2), separado por moneda.
+
+VERSIÓN 3 — Automatización y Análisis:
+- Importador de CSV genérico para cualquier banco/billetera: mapeo manual de columnas (fecha, importe, descripción) con persistencia del mapeo (column_map guardado por cuenta/banco para reutilizarlo en futuras importaciones). Detección de duplicados por fila y confirmación en bloque o individual (filas sospechosas de duplicado nunca se auto-confirman).
+- Conciliación asistida: el usuario ingresa el saldo real que ve en su banco y la app exhibe la diferencia contra el saldo contable calculado (sin crear ajustes automáticos).
+- Evolución patrimonial histórica reconstruida retroactivamente desde los movimientos.
+- Análisis de gastos por categoría (% sobre el total del período).
+- Presupuestos mensuales por categoría ("YYYY-MM") con semáforo: OK (<80%), Cerca (>=80%), Excedido (>100%).
+- Objetivos de ahorro con aportes propios (no computan como gasto).
+- Alertas configurables evaluadas en tiempo real al consultar la app (saldo mínimo, gasto grande, presupuesto excedido).
+- Exportación integral a Excel (.xlsx) sumando pestañas de Inversiones y Presupuestos, más backup completo en JSON.
+
+5. LECCIONES TÉCNICAS DEL PROYECTO ANTERIOR (REGLAS DE IMPLEMENTACIÓN)
+--------------------------------------------------------------------------------
+1. Orden de alternancia en Regex de montos: En los parsers de texto y OCR, evaluar SIEMPRE primero el patrón con separador de miles explícito (ej. `\d{1,3}(?:\.\d{3})+`) y recién después el número plano (`\d+`). Invertir este orden trunca cifras largas como "10580" leyendo solo "105".
+2. Limpieza previa de porcentajes: En capturas de carteras suelen aparecer porcentajes con 2 o 3 decimales ("0,000 %"). Eliminar todos los porcentajes de la línea ANTES de ejecutar el extractor de importes monetarios.
+3. Validación diferenciada del Cero: Crear dos validadores distintos: `validatePositiveCents(n)` (> 0, para transacciones, compras, ventas) y `validateNonNegativeCents(n)` (>= 0, para efectivo en cartera, saldos iniciales y costo promedio).
+
+6. ESQUEMA RELACIONAL COMPLETO (CLOUDFLARE D1 - MULTITENANT)
+--------------------------------------------------------------------------------
+-- Todas las tablas de usuario incluyen user_id indexado para aislar cuentas de Google.
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY, -- Google 'sub' ID único
+    email TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    picture TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- === MÓDULO V1: CONTABILIDAD CORE ===
+
+CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('cash', 'bank', 'wallet', 'other')),
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    opening_balance INTEGER NOT NULL DEFAULT 0 CHECK(opening_balance >= 0),
+    csv_column_map TEXT, -- JSON opcional para recordar el mapeo CSV de esta cuenta (V3)
+    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_id);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('income', 'expense')),
+    parent_id TEXT REFERENCES categories(id),
+    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_categories_user ON categories(user_id);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    date TEXT NOT NULL, -- YYYY-MM-DD
+    type TEXT NOT NULL CHECK(type IN ('income', 'expense', 'transfer')),
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    counter_account_id TEXT REFERENCES accounts(id), -- Obligatorio si type = 'transfer', NULL en otros
+    category_id TEXT REFERENCES categories(id), -- NULL si type = 'transfer'
+    amount INTEGER NOT NULL CHECK(amount > 0), -- Siempre en centavos > 0
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    note TEXT,
+    source TEXT NOT NULL CHECK(source IN ('manual', 'nlp', 'capture', 'import')),
+    voided_at INTEGER, -- NULL = activo; timestamp = anulado
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_counter_account ON transactions(counter_account_id);
+
+CREATE TABLE IF NOT EXISTS movement_drafts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK(source IN ('nlp', 'capture')),
+    raw_input TEXT,
+    extracted_json TEXT NOT NULL,
+    uncertain_fields TEXT, -- JSON array de campos que el parser no pudo asegurar
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed', 'discarded')),
+    matched_transaction_id TEXT REFERENCES transactions(id),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_movement_drafts_user ON movement_drafts(user_id, status);
+
+-- === MÓDULO V2: INVERSIONES Y PATRIMONIO ===
+
+CREATE TABLE IF NOT EXISTS portfolios (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    broker TEXT,
+    base_currency TEXT NOT NULL CHECK(base_currency IN ('ARS', 'USD')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_portfolios_user ON portfolios(user_id);
+
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    asset_class TEXT NOT NULL CHECK(asset_class IN ('stock', 'cedear', 'bond', 'crypto', 'fci', 'other')),
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD'))
+);
+
+CREATE TABLE IF NOT EXISTS holdings (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    asset_id TEXT NOT NULL REFERENCES assets(id),
+    quantity REAL NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+    avg_cost INTEGER NOT NULL DEFAULT 0 CHECK(avg_cost >= 0), -- Centavos
+    last_price INTEGER NOT NULL DEFAULT 0 CHECK(last_price >= 0), -- Centavos
+    last_price_date TEXT,
+    UNIQUE(portfolio_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_holdings_portfolio ON holdings(portfolio_id);
+
+CREATE TABLE IF NOT EXISTS portfolio_cash (
+    portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    amount INTEGER NOT NULL DEFAULT 0 CHECK(amount >= 0), -- Centavos (>= 0 permitido)
+    PRIMARY KEY (portfolio_id, currency)
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_snapshot_drafts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    raw_text TEXT,
+    rows_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed', 'discarded')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS trades (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    asset_id TEXT NOT NULL REFERENCES assets(id),
+    side TEXT NOT NULL CHECK(side IN ('buy', 'sell')),
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    price INTEGER NOT NULL CHECK(price > 0), -- Centavos
+    fee INTEGER NOT NULL DEFAULT 0 CHECK(fee >= 0), -- Centavos
+    date TEXT NOT NULL,
+    settlement_account_id TEXT REFERENCES accounts(id), -- Solo informativo, no mueve saldo V1
+    realized_gain INTEGER, -- Centavos (calculado en ventas)
+    note TEXT,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio_id, date);
+
+CREATE TABLE IF NOT EXISTS portfolio_incomes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portfolio_id TEXT NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    asset_id TEXT REFERENCES assets(id),
+    type TEXT NOT NULL CHECK(type IN ('dividend', 'interest')),
+    amount INTEGER NOT NULL CHECK(amount > 0),
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    date TEXT NOT NULL,
+    note TEXT
+);
+
+-- === MÓDULO V3: AUTOMATIZACIÓN, PRESUPUESTOS Y ANÁLISIS ===
+
+CREATE TABLE IF NOT EXISTS import_batches (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    filename TEXT NOT NULL,
+    column_map TEXT NOT NULL, -- JSON del mapeo utilizado
+    status TEXT NOT NULL DEFAULT 'staging' CHECK(status IN ('staging', 'completed', 'cancelled')),
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS import_rows (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    batch_id TEXT NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+    raw_json TEXT NOT NULL,
+    date TEXT,
+    amount INTEGER, -- Centavos
+    description TEXT,
+    type_guess TEXT CHECK(type_guess IN ('income', 'expense')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'confirmed', 'skipped')),
+    duplicate_of TEXT REFERENCES transactions(id),
+    matched_transaction_id TEXT REFERENCES transactions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_import_rows_batch ON import_rows(batch_id);
+
+CREATE TABLE IF NOT EXISTS budgets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    category_id TEXT NOT NULL REFERENCES categories(id),
+    period TEXT NOT NULL, -- Formato YYYY-MM
+    limit_amount INTEGER NOT NULL CHECK(limit_amount > 0),
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    UNIQUE(user_id, category_id, period, currency)
+);
+
+CREATE TABLE IF NOT EXISTS savings_goals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    target_amount INTEGER NOT NULL CHECK(target_amount > 0),
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    target_date TEXT,
+    archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS savings_contributions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    goal_id TEXT NOT NULL REFERENCES savings_goals(id) ON DELETE CASCADE,
+    amount INTEGER NOT NULL CHECK(amount > 0),
+    date TEXT NOT NULL,
+    note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('budget_exceeded', 'large_expense', 'low_balance')),
+    category_id TEXT REFERENCES categories(id),
+    account_id TEXT REFERENCES accounts(id),
+    threshold INTEGER NOT NULL CHECK(threshold >= 0),
+    currency TEXT NOT NULL CHECK(currency IN ('ARS', 'USD')),
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1))
+);
+================================================================================

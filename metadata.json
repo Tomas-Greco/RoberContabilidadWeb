@@ -1,0 +1,6 @@
+{
+  "name": "Patrimonio — Contabilidad Personal e Inversiones",
+  "description": "Sistema web multitenant de contabilidad personal, patrimonio e inversiones con costo operativo $0, parser determinístico, OCR en navegador y exportación a Excel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
