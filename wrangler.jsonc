@@ -3,6 +3,9 @@
   "name": "robercontabilidadweb",
   "compatibility_date": "2025-02-04",
   "pages_build_output_dir": "dist",
+  "assets": {
+    "directory": "./dist"
+  },
   "d1_databases": [
     {
       "binding": "DB",
