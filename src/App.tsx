@@ -188,19 +188,40 @@ export default function App() {
               portfolioCash={snapshot.portfolioCash}
               trades={snapshot.trades}
               portfolioIncomes={snapshot.portfolioIncomes}
-              snapshotDrafts={snapshot.snapshotDrafts}
               onCreatePortfolio={async (input) => {
                 const p = await ledgerStore.createPortfolio(input);
                 await refresh();
                 return p;
+              }}
+              onUpdatePortfolio={async (input) => {
+                const p = await ledgerStore.updatePortfolio(input);
+                await refresh();
+                return p;
+              }}
+              onDeletePortfolio={async (id) => {
+                await ledgerStore.deletePortfolio(id);
+                await refresh();
               }}
               onCreateAsset={async (input) => {
                 const a = await ledgerStore.createAsset(input);
                 await refresh();
                 return a;
               }}
+              onUpdateAsset={async (input) => {
+                const a = await ledgerStore.updateAsset(input);
+                await refresh();
+                return a;
+              }}
+              onDeleteAsset={async (id) => {
+                await ledgerStore.deleteAsset(id);
+                await refresh();
+              }}
               onUpdateHoldingPrice={async (input) => {
                 await ledgerStore.updateHoldingPrice(input);
+                await refresh();
+              }}
+              onDeleteHolding={async (id) => {
+                await ledgerStore.deleteHolding(id);
                 await refresh();
               }}
               onUpdatePortfolioCash={async (input) => {
@@ -211,20 +232,20 @@ export default function App() {
                 await ledgerStore.recordTrade(input);
                 await refresh();
               }}
+              onUpdateTrade={async (input) => {
+                await ledgerStore.updateTrade(input);
+                await refresh();
+              }}
+              onDeleteTrade={async (id) => {
+                await ledgerStore.deleteTrade(id);
+                await refresh();
+              }}
               onCreatePortfolioIncome={async (input) => {
                 await ledgerStore.createPortfolioIncome(input);
                 await refresh();
               }}
-              onCreateSnapshotDraft={async (input) => {
-                await ledgerStore.createSnapshotDraft(input);
-                await refresh();
-              }}
-              onConfirmSnapshotDraft={async (input) => {
-                await ledgerStore.confirmSnapshotDraft(input);
-                await refresh();
-              }}
-              onDiscardSnapshotDraft={async (draftId) => {
-                await ledgerStore.discardSnapshotDraft(draftId);
+              onDeletePortfolioIncome={async (id) => {
+                await ledgerStore.deletePortfolioIncome(id);
                 await refresh();
               }}
               onRefreshUsdQuotes={async () => {

@@ -16,6 +16,7 @@ import {
   applyTradeToHolding,
   canAutoQuoteWithYahoo,
   InvestmentRuleError,
+  recalculateHoldingFromTrades,
 } from '../shared/investments';
 import { LedgerRuleError, validateTransactionInvariants } from '../shared/ledger';
 import { assertNonNegativeCents, assertPositiveCents, MoneyValidationError, toCents } from '../shared/money';
@@ -822,119 +823,292 @@ export default {
         });
       }
 
-      // 9. /api/portfolios
-      if (pathname === '/api/portfolios' && request.method === 'POST') {
-        const body = (await request.json()) as {
-          name: string;
-          broker?: string | null;
-          base_currency: Currency;
-        };
-        const name = body.name?.trim();
-        if (!name) return err('El nombre de la cartera es obligatorio.');
-        if (body.base_currency !== 'ARS' && body.base_currency !== 'USD') {
-          return err('La moneda base debe ser ARS o USD (RN-03).');
+      // 9. /api/portfolios (Alta, Edición y Eliminación de Carteras)
+      if (pathname === '/api/portfolios') {
+        if (request.method === 'POST') {
+          const body = (await request.json()) as {
+            name: string;
+            broker?: string | null;
+            base_currency: Currency;
+          };
+          const name = body.name?.trim();
+          if (!name) return err('El nombre de la cartera es obligatorio.');
+          if (body.base_currency !== 'ARS' && body.base_currency !== 'USD') {
+            return err('La moneda base debe ser ARS o USD (RN-03).');
+          }
+
+          const id = crypto.randomUUID();
+          const createdAt = Math.floor(Date.now() / 1000);
+          const broker = body.broker?.trim() || null;
+
+          await env.DB.batch([
+            env.DB.prepare(
+              'INSERT INTO portfolios (id, user_id, name, broker, base_currency, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+            ).bind(id, user.id, name, broker, body.base_currency, createdAt),
+            env.DB.prepare(
+              'INSERT INTO portfolio_cash (portfolio_id, user_id, currency, amount) VALUES (?, ?, ?, 0) ON CONFLICT(portfolio_id, currency) DO NOTHING'
+            ).bind(id, user.id, body.base_currency),
+          ]);
+
+          return json(
+            {
+              portfolio: {
+                id,
+                user_id: user.id,
+                name,
+                broker,
+                base_currency: body.base_currency,
+                created_at: createdAt,
+              },
+            },
+            201
+          );
         }
 
-        const id = crypto.randomUUID();
-        const createdAt = Math.floor(Date.now() / 1000);
-        const broker = body.broker?.trim() || null;
+        if (request.method === 'PATCH') {
+          const body = (await request.json()) as {
+            id: string;
+            name: string;
+            broker?: string | null;
+            base_currency: Currency;
+          };
+          const existing = await env.DB.prepare(
+            'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.id, user.id)
+            .first<PortfolioRecord>();
+          if (!existing) return err('Cartera no encontrada.', 404);
 
-        await env.DB.batch([
-          env.DB.prepare(
-            'INSERT INTO portfolios (id, user_id, name, broker, base_currency, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-          ).bind(id, user.id, name, broker, body.base_currency, createdAt),
-          env.DB.prepare(
-            'INSERT INTO portfolio_cash (portfolio_id, user_id, currency, amount) VALUES (?, ?, ?, 0) ON CONFLICT(portfolio_id, currency) DO NOTHING'
-          ).bind(id, user.id, body.base_currency),
-        ]);
+          const name = body.name?.trim();
+          if (!name) return err('El nombre de la cartera es obligatorio.');
+          const baseCurrency: Currency =
+            body.base_currency === 'USD' ? 'USD' : body.base_currency === 'ARS' ? 'ARS' : existing.base_currency;
+          const broker = body.broker !== undefined ? body.broker?.trim() || null : existing.broker;
 
-        return json(
-          {
+          await env.DB.batch([
+            env.DB.prepare(
+              'UPDATE portfolios SET name = ?, broker = ?, base_currency = ? WHERE id = ? AND user_id = ?'
+            ).bind(name, broker, baseCurrency, existing.id, user.id),
+            env.DB.prepare(
+              'INSERT INTO portfolio_cash (portfolio_id, user_id, currency, amount) VALUES (?, ?, ?, 0) ON CONFLICT(portfolio_id, currency) DO NOTHING'
+            ).bind(existing.id, user.id, baseCurrency),
+          ]);
+
+          return json({
             portfolio: {
-              id,
-              user_id: user.id,
+              ...existing,
               name,
               broker,
-              base_currency: body.base_currency,
-              created_at: createdAt,
+              base_currency: baseCurrency,
             },
-          },
-          201
-        );
+          });
+        }
+
+        if (request.method === 'DELETE') {
+          const body = (await request.json()) as { id: string };
+          const existing = await env.DB.prepare(
+            'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.id, user.id)
+            .first<PortfolioRecord>();
+          if (!existing) return err('Cartera no encontrada.', 404);
+
+          await env.DB.batch([
+            env.DB.prepare('DELETE FROM trades WHERE portfolio_id = ? AND user_id = ?').bind(
+              existing.id,
+              user.id
+            ),
+            env.DB.prepare('DELETE FROM holdings WHERE portfolio_id = ? AND user_id = ?').bind(
+              existing.id,
+              user.id
+            ),
+            env.DB.prepare(
+              'DELETE FROM portfolio_incomes WHERE portfolio_id = ? AND user_id = ?'
+            ).bind(existing.id, user.id),
+            env.DB.prepare(
+              'DELETE FROM portfolio_cash WHERE portfolio_id = ? AND user_id = ?'
+            ).bind(existing.id, user.id),
+            env.DB.prepare(
+              'DELETE FROM portfolio_snapshot_drafts WHERE portfolio_id = ? AND user_id = ?'
+            ).bind(existing.id, user.id),
+            env.DB.prepare('DELETE FROM portfolios WHERE id = ? AND user_id = ?').bind(
+              existing.id,
+              user.id
+            ),
+          ]);
+
+          return json({ ok: true });
+        }
       }
 
-      // 10. /api/assets
-      if (pathname === '/api/assets' && request.method === 'POST') {
-        const body = (await request.json()) as {
-          ticker: string;
-          name: string;
-          asset_class: AssetClass;
-          currency: Currency;
-        };
-        const ticker = body.ticker?.trim().toUpperCase();
-        const name = body.name?.trim();
-        if (!ticker || !name) {
-          return err('El ticker y el nombre del activo son obligatorios.');
+      // 10. /api/assets (Alta, Edición y Eliminación de Activos Financieros)
+      if (pathname === '/api/assets') {
+        if (request.method === 'POST') {
+          const body = (await request.json()) as {
+            ticker: string;
+            name: string;
+            asset_class: AssetClass;
+            currency: Currency;
+          };
+          const ticker = body.ticker?.trim().toUpperCase();
+          const name = body.name?.trim();
+          if (!ticker || !name) {
+            return err('El ticker y el nombre del activo son obligatorios.');
+          }
+
+          const existing = await env.DB.prepare('SELECT * FROM assets WHERE ticker = ?')
+            .bind(ticker)
+            .first<AssetRecord>();
+          if (existing) {
+            return json({ asset: existing });
+          }
+
+          const id = crypto.randomUUID();
+          await env.DB.prepare(
+            'INSERT INTO assets (id, ticker, name, asset_class, currency) VALUES (?, ?, ?, ?, ?)'
+          )
+            .bind(id, ticker, name, body.asset_class, body.currency)
+            .run();
+
+          return json(
+            {
+              asset: {
+                id,
+                ticker,
+                name,
+                asset_class: body.asset_class,
+                currency: body.currency,
+              },
+            },
+            201
+          );
         }
 
-        const existing = await env.DB.prepare('SELECT * FROM assets WHERE ticker = ?')
-          .bind(ticker)
-          .first<AssetRecord>();
-        if (existing) {
-          return json({ asset: existing });
-        }
+        if (request.method === 'PATCH') {
+          const body = (await request.json()) as {
+            id: string;
+            ticker: string;
+            name: string;
+            asset_class: AssetClass;
+            currency: Currency;
+          };
+          const existing = await env.DB.prepare('SELECT * FROM assets WHERE id = ?')
+            .bind(body.id)
+            .first<AssetRecord>();
+          if (!existing) return err('Activo no encontrado.', 404);
 
-        const id = crypto.randomUUID();
-        await env.DB.prepare(
-          'INSERT INTO assets (id, ticker, name, asset_class, currency) VALUES (?, ?, ?, ?, ?)'
-        )
-          .bind(id, ticker, name, body.asset_class, body.currency)
-          .run();
+          const ticker = body.ticker?.trim().toUpperCase();
+          const name = body.name?.trim();
+          if (!ticker || !name) {
+            return err('El ticker y el nombre del activo son obligatorios.');
+          }
 
-        return json(
-          {
+          const conflict = await env.DB.prepare(
+            'SELECT id FROM assets WHERE ticker = ? AND id != ?'
+          )
+            .bind(ticker, existing.id)
+            .first<{ id: string }>();
+          if (conflict) {
+            return err(`Ya existe otro activo con el ticker ${ticker}.`, 400);
+          }
+
+          await env.DB.prepare(
+            'UPDATE assets SET ticker = ?, name = ?, asset_class = ?, currency = ? WHERE id = ?'
+          )
+            .bind(ticker, name, body.asset_class, body.currency, existing.id)
+            .run();
+
+          return json({
             asset: {
-              id,
+              id: existing.id,
               ticker,
               name,
               asset_class: body.asset_class,
               currency: body.currency,
             },
-          },
-          201
-        );
+          });
+        }
+
+        if (request.method === 'DELETE') {
+          const body = (await request.json()) as { id: string };
+          const existing = await env.DB.prepare('SELECT * FROM assets WHERE id = ?')
+            .bind(body.id)
+            .first<AssetRecord>();
+          if (!existing) return err('Activo no encontrado.', 404);
+
+          await env.DB.batch([
+            env.DB.prepare('DELETE FROM trades WHERE asset_id = ? AND user_id = ?').bind(
+              existing.id,
+              user.id
+            ),
+            env.DB.prepare('DELETE FROM holdings WHERE asset_id = ? AND user_id = ?').bind(
+              existing.id,
+              user.id
+            ),
+            env.DB.prepare(
+              'UPDATE portfolio_incomes SET asset_id = NULL WHERE asset_id = ? AND user_id = ?'
+            ).bind(existing.id, user.id),
+            env.DB.prepare('DELETE FROM assets WHERE id = ?').bind(existing.id),
+          ]);
+
+          return json({ ok: true });
+        }
       }
 
-      // 11. /api/holdings (Actualización manual de último precio conocido)
-      if (pathname === '/api/holdings' && request.method === 'PATCH') {
-        const body = (await request.json()) as {
-          id: string;
-          last_price: number;
-          last_price_date?: string;
-        };
-        const lastPrice = assertNonNegativeCents(body.last_price, 'last_price');
-        const dateStr = body.last_price_date || new Date().toISOString().slice(0, 10);
+      // 11. /api/holdings (Actualización manual de precio o eliminación de posición)
+      if (pathname === '/api/holdings') {
+        if (request.method === 'PATCH') {
+          const body = (await request.json()) as {
+            id: string;
+            last_price: number;
+            last_price_date?: string;
+          };
+          const lastPrice = assertNonNegativeCents(body.last_price, 'last_price');
+          const dateStr = body.last_price_date || new Date().toISOString().slice(0, 10);
 
-        const existing = await env.DB.prepare(
-          'SELECT * FROM holdings WHERE id = ? AND user_id = ?'
-        )
-          .bind(body.id, user.id)
-          .first<HoldingRecord>();
-        if (!existing) return err('Tenencia no encontrada.', 404);
+          const existing = await env.DB.prepare(
+            'SELECT * FROM holdings WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.id, user.id)
+            .first<HoldingRecord>();
+          if (!existing) return err('Tenencia no encontrada.', 404);
 
-        await env.DB.prepare(
-          'UPDATE holdings SET last_price = ?, last_price_date = ? WHERE id = ? AND user_id = ?'
-        )
-          .bind(lastPrice, dateStr, body.id, user.id)
-          .run();
+          await env.DB.prepare(
+            'UPDATE holdings SET last_price = ?, last_price_date = ? WHERE id = ? AND user_id = ?'
+          )
+            .bind(lastPrice, dateStr, body.id, user.id)
+            .run();
 
-        return json({
-          holding: {
-            ...existing,
-            last_price: lastPrice,
-            last_price_date: dateStr,
-          },
-        });
+          return json({
+            holding: {
+              ...existing,
+              last_price: lastPrice,
+              last_price_date: dateStr,
+            },
+          });
+        }
+
+        if (request.method === 'DELETE') {
+          const body = (await request.json()) as { id: string };
+          const existing = await env.DB.prepare(
+            'SELECT * FROM holdings WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.id, user.id)
+            .first<HoldingRecord>();
+          if (!existing) return err('Tenencia no encontrada.', 404);
+
+          await env.DB.batch([
+            env.DB.prepare(
+              'DELETE FROM trades WHERE portfolio_id = ? AND asset_id = ? AND user_id = ?'
+            ).bind(existing.portfolio_id, existing.asset_id, user.id),
+            env.DB.prepare('DELETE FROM holdings WHERE id = ? AND user_id = ?').bind(
+              existing.id,
+              user.id
+            ),
+          ]);
+
+          return json({ ok: true });
+        }
       }
 
       // 12. /api/portfolio-cash (RN-06: Efectivo líquido en el broker admite >= 0 centavos)
@@ -971,134 +1145,326 @@ export default {
         });
       }
 
-      // 13. /api/trades (RN-02: Compra/Venta recalcula avg_cost y realized_gain; NO toca transactions de V1)
-      if (pathname === '/api/trades' && request.method === 'POST') {
-        const body = (await request.json()) as {
-          portfolio_id: string;
-          asset_id: string;
-          side: TradeSide;
-          quantity: number;
-          price: number;
-          fee?: number;
-          date: string;
-          settlement_account_id?: string | null;
-          note?: string | null;
-        };
+      // 13. /api/trades (RN-02: Alta, Edición y Eliminación de Compras/Ventas recalculando avg_cost y realized_gain)
+      if (pathname === '/api/trades') {
+        if (request.method === 'POST') {
+          const body = (await request.json()) as {
+            portfolio_id: string;
+            asset_id: string;
+            side: TradeSide;
+            quantity: number;
+            price: number;
+            fee?: number;
+            date: string;
+            settlement_account_id?: string | null;
+            note?: string | null;
+          };
 
-        const portfolio = await env.DB.prepare(
-          'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
-        )
-          .bind(body.portfolio_id, user.id)
-          .first<PortfolioRecord>();
-        if (!portfolio) return err('Cartera no encontrada.', 404);
+          const portfolio = await env.DB.prepare(
+            'SELECT * FROM portfolios WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.portfolio_id, user.id)
+            .first<PortfolioRecord>();
+          if (!portfolio) return err('Cartera no encontrada.', 404);
 
-        const asset = await env.DB.prepare('SELECT * FROM assets WHERE id = ?')
-          .bind(body.asset_id)
-          .first<AssetRecord>();
-        if (!asset) return err('Activo no encontrado.', 404);
+          const asset = await env.DB.prepare('SELECT * FROM assets WHERE id = ?')
+            .bind(body.asset_id)
+            .first<AssetRecord>();
+          if (!asset) return err('Activo no encontrado.', 404);
 
-        const existingHolding = await env.DB.prepare(
-          'SELECT * FROM holdings WHERE portfolio_id = ? AND asset_id = ? AND user_id = ?'
-        )
-          .bind(portfolio.id, asset.id, user.id)
-          .first<HoldingRecord>();
+          const existingHolding = await env.DB.prepare(
+            'SELECT * FROM holdings WHERE portfolio_id = ? AND asset_id = ? AND user_id = ?'
+          )
+            .bind(portfolio.id, asset.id, user.id)
+            .first<HoldingRecord>();
 
-        let execResult;
-        try {
-          execResult = applyTradeToHolding({
-            currentQuantity: existingHolding?.quantity ?? 0,
-            currentAvgCostCents: existingHolding?.avg_cost ?? 0,
-            side: body.side,
-            tradeQuantity: body.quantity,
-            tradePriceCents: body.price,
-            feeCents: body.fee ?? 0,
-          });
-        } catch (e) {
-          if (e instanceof InvestmentRuleError || e instanceof MoneyValidationError) {
-            return err(e.message, 400);
+          let execResult;
+          try {
+            execResult = applyTradeToHolding({
+              currentQuantity: existingHolding?.quantity ?? 0,
+              currentAvgCostCents: existingHolding?.avg_cost ?? 0,
+              side: body.side,
+              tradeQuantity: body.quantity,
+              tradePriceCents: body.price,
+              feeCents: body.fee ?? 0,
+            });
+          } catch (e) {
+            if (e instanceof InvestmentRuleError || e instanceof MoneyValidationError) {
+              return err(e.message, 400);
+            }
+            return err('Error al procesar la operación de inversión.', 400);
           }
-          return err('Error al procesar la operación de inversión.', 400);
+
+          const tradeId = crypto.randomUUID();
+          const createdAt = Math.floor(Date.now() / 1000);
+          const feeCents = assertNonNegativeCents(body.fee ?? 0, 'fee');
+          const plainNote = body.note?.trim() || null;
+          const encryptedNote = await encryptSensitiveText(plainNote, userAesKey);
+          const holdingId = existingHolding?.id ?? crypto.randomUUID();
+
+          await env.DB.batch([
+            env.DB.prepare(
+              `INSERT INTO trades (id, user_id, portfolio_id, asset_id, side, quantity, price, fee, date, settlement_account_id, realized_gain, note, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              tradeId,
+              user.id,
+              portfolio.id,
+              asset.id,
+              body.side,
+              body.quantity,
+              body.price,
+              feeCents,
+              body.date,
+              body.settlement_account_id ?? null,
+              execResult.realizedGainCents,
+              encryptedNote,
+              createdAt
+            ),
+            env.DB.prepare(
+              `INSERT INTO holdings (id, user_id, portfolio_id, asset_id, quantity, avg_cost, last_price, last_price_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(portfolio_id, asset_id) DO UPDATE SET
+                 quantity = excluded.quantity,
+                 avg_cost = excluded.avg_cost,
+                 last_price = excluded.last_price,
+                 last_price_date = excluded.last_price_date`
+            ).bind(
+              holdingId,
+              user.id,
+              portfolio.id,
+              asset.id,
+              execResult.nextQuantity,
+              execResult.nextAvgCostCents,
+              body.price,
+              body.date
+            ),
+          ]);
+
+          return json(
+            {
+              trade: {
+                id: tradeId,
+                user_id: user.id,
+                portfolio_id: portfolio.id,
+                asset_id: asset.id,
+                side: body.side,
+                quantity: body.quantity,
+                price: body.price,
+                fee: feeCents,
+                date: body.date,
+                settlement_account_id: body.settlement_account_id ?? null,
+                realized_gain: execResult.realizedGainCents,
+                note: plainNote,
+                created_at: createdAt,
+              },
+              holding: {
+                id: holdingId,
+                user_id: user.id,
+                portfolio_id: portfolio.id,
+                asset_id: asset.id,
+                quantity: execResult.nextQuantity,
+                avg_cost: execResult.nextAvgCostCents,
+                last_price: body.price,
+                last_price_date: body.date,
+              },
+            },
+            201
+          );
         }
 
-        const tradeId = crypto.randomUUID();
-        const createdAt = Math.floor(Date.now() / 1000);
-        const feeCents = assertNonNegativeCents(body.fee ?? 0, 'fee');
-        const plainNote = body.note?.trim() || null;
-        const encryptedNote = await encryptSensitiveText(plainNote, userAesKey);
-        const holdingId = existingHolding?.id ?? crypto.randomUUID();
+        if (request.method === 'PATCH') {
+          const body = (await request.json()) as {
+            id: string;
+            side: TradeSide;
+            quantity: number;
+            price: number;
+            fee?: number;
+            date: string;
+            settlement_account_id?: string | null;
+            note?: string | null;
+          };
 
-        await env.DB.batch([
-          env.DB.prepare(
-            `INSERT INTO trades (id, user_id, portfolio_id, asset_id, side, quantity, price, fee, date, settlement_account_id, realized_gain, note, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(
-            tradeId,
-            user.id,
-            portfolio.id,
-            asset.id,
-            body.side,
-            body.quantity,
-            body.price,
-            feeCents,
-            body.date,
-            body.settlement_account_id ?? null,
-            execResult.realizedGainCents,
-            encryptedNote,
-            createdAt
-          ),
-          env.DB.prepare(
-            `INSERT INTO holdings (id, user_id, portfolio_id, asset_id, quantity, avg_cost, last_price, last_price_date)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(portfolio_id, asset_id) DO UPDATE SET
-               quantity = excluded.quantity,
-               avg_cost = excluded.avg_cost,
-               last_price = excluded.last_price,
-               last_price_date = excluded.last_price_date`
-          ).bind(
-            holdingId,
-            user.id,
-            portfolio.id,
-            asset.id,
-            execResult.nextQuantity,
-            execResult.nextAvgCostCents,
-            body.price,
-            body.date
-          ),
-        ]);
+          const existingTrade = await env.DB.prepare(
+            'SELECT * FROM trades WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.id, user.id)
+            .first<TradeRecord>();
+          if (!existingTrade) return err('Operación no encontrada.', 404);
 
-        return json(
-          {
-            trade: {
-              id: tradeId,
-              user_id: user.id,
-              portfolio_id: portfolio.id,
-              asset_id: asset.id,
-              side: body.side,
-              quantity: body.quantity,
-              price: body.price,
-              fee: feeCents,
-              date: body.date,
-              settlement_account_id: body.settlement_account_id ?? null,
-              realized_gain: execResult.realizedGainCents,
-              note: plainNote,
-              created_at: createdAt,
-            },
-            holding: {
-              id: holdingId,
-              user_id: user.id,
-              portfolio_id: portfolio.id,
-              asset_id: asset.id,
-              quantity: execResult.nextQuantity,
-              avg_cost: execResult.nextAvgCostCents,
-              last_price: body.price,
-              last_price_date: body.date,
-            },
-          },
-          201
-        );
+          const feeCents = assertNonNegativeCents(body.fee ?? 0, 'fee');
+          const priceCents = assertPositiveCents(body.price, 'price');
+          const plainNote = body.note?.trim() || null;
+          const encryptedNote = await encryptSensitiveText(plainNote, userAesKey);
+
+          const { results: pairTrades } = await env.DB.prepare(
+            'SELECT * FROM trades WHERE portfolio_id = ? AND asset_id = ? AND user_id = ? ORDER BY date ASC, created_at ASC'
+          )
+            .bind(existingTrade.portfolio_id, existingTrade.asset_id, user.id)
+            .all<TradeRecord>();
+
+          const candidateTrades = (pairTrades ?? []).map((t) =>
+            t.id === existingTrade.id
+              ? {
+                  ...t,
+                  side: body.side,
+                  quantity: body.quantity,
+                  price: priceCents,
+                  fee: feeCents,
+                  date: body.date,
+                  settlement_account_id: body.settlement_account_id ?? null,
+                  note: encryptedNote,
+                }
+              : t
+          );
+
+          const existingHolding = await env.DB.prepare(
+            'SELECT * FROM holdings WHERE portfolio_id = ? AND asset_id = ? AND user_id = ?'
+          )
+            .bind(existingTrade.portfolio_id, existingTrade.asset_id, user.id)
+            .first<HoldingRecord>();
+
+          let recalc;
+          try {
+            recalc = recalculateHoldingFromTrades(
+              candidateTrades,
+              existingHolding?.last_price ?? priceCents,
+              existingHolding?.last_price_date ?? body.date
+            );
+          } catch (e) {
+            if (e instanceof InvestmentRuleError || e instanceof MoneyValidationError) {
+              return err(e.message, 400);
+            }
+            return err('No se puede aplicar este cambio porque dejaría una venta posterior sin saldo suficiente.', 400);
+          }
+
+          const stmts = recalc.updatedTrades.map((tr) =>
+            env.DB.prepare(
+              'UPDATE trades SET side = ?, quantity = ?, price = ?, fee = ?, date = ?, settlement_account_id = ?, realized_gain = ?, note = ? WHERE id = ? AND user_id = ?'
+            ).bind(
+              tr.side,
+              tr.quantity,
+              tr.price,
+              tr.fee,
+              tr.date,
+              tr.settlement_account_id,
+              tr.realized_gain,
+              tr.note,
+              tr.id,
+              user.id
+            )
+          );
+
+          if (existingHolding) {
+            stmts.push(
+              env.DB.prepare(
+                'UPDATE holdings SET quantity = ?, avg_cost = ?, last_price = ?, last_price_date = ? WHERE id = ? AND user_id = ?'
+              ).bind(
+                recalc.quantity,
+                recalc.avgCostCents,
+                recalc.lastPriceCents,
+                recalc.lastPriceDate,
+                existingHolding.id,
+                user.id
+              )
+            );
+          }
+
+          await env.DB.batch(stmts);
+          return json({ ok: true });
+        }
+
+        if (request.method === 'DELETE') {
+          const body = (await request.json()) as { id: string };
+          const existingTrade = await env.DB.prepare(
+            'SELECT * FROM trades WHERE id = ? AND user_id = ?'
+          )
+            .bind(body.id, user.id)
+            .first<TradeRecord>();
+          if (!existingTrade) return err('Operación no encontrada.', 404);
+
+          const { results: pairTrades } = await env.DB.prepare(
+            'SELECT * FROM trades WHERE portfolio_id = ? AND asset_id = ? AND user_id = ? ORDER BY date ASC, created_at ASC'
+          )
+            .bind(existingTrade.portfolio_id, existingTrade.asset_id, user.id)
+            .all<TradeRecord>();
+
+          const remainingTrades = (pairTrades ?? []).filter((t) => t.id !== existingTrade.id);
+
+          const existingHolding = await env.DB.prepare(
+            'SELECT * FROM holdings WHERE portfolio_id = ? AND asset_id = ? AND user_id = ?'
+          )
+            .bind(existingTrade.portfolio_id, existingTrade.asset_id, user.id)
+            .first<HoldingRecord>();
+
+          let recalc;
+          try {
+            recalc = recalculateHoldingFromTrades(
+              remainingTrades,
+              existingHolding?.last_price ?? 0,
+              existingHolding?.last_price_date ?? null
+            );
+          } catch (e) {
+            if (e instanceof InvestmentRuleError || e instanceof MoneyValidationError) {
+              return err(
+                `No se puede eliminar esta compra porque existe una venta posterior que depende de estas unidades (${e.message}). Eliminá primero la venta posterior.`,
+                400
+              );
+            }
+            return err('No se puede eliminar esta operación por consistencia de cartera.', 400);
+          }
+
+          const stmts = [
+            env.DB.prepare('DELETE FROM trades WHERE id = ? AND user_id = ?').bind(
+              existingTrade.id,
+              user.id
+            ),
+            ...recalc.updatedTrades.map((tr) =>
+              env.DB.prepare(
+                'UPDATE trades SET realized_gain = ? WHERE id = ? AND user_id = ?'
+              ).bind(tr.realized_gain, tr.id, user.id)
+            ),
+          ];
+
+          if (existingHolding) {
+            if (remainingTrades.length === 0) {
+              stmts.push(
+                env.DB.prepare('DELETE FROM holdings WHERE id = ? AND user_id = ?').bind(
+                  existingHolding.id,
+                  user.id
+                )
+              );
+            } else {
+              stmts.push(
+                env.DB.prepare(
+                  'UPDATE holdings SET quantity = ?, avg_cost = ?, last_price = ?, last_price_date = ? WHERE id = ? AND user_id = ?'
+                ).bind(
+                  recalc.quantity,
+                  recalc.avgCostCents,
+                  recalc.lastPriceCents,
+                  recalc.lastPriceDate,
+                  existingHolding.id,
+                  user.id
+                )
+              );
+            }
+          }
+
+          await env.DB.batch(stmts);
+          return json({ ok: true });
+        }
       }
 
       // 14. /api/portfolio-incomes (Dividendos e intereses de cartera)
+      if (pathname === '/api/portfolio-incomes') {
+        if (request.method === 'DELETE') {
+          const body = (await request.json()) as { id: string };
+          await env.DB.prepare('DELETE FROM portfolio_incomes WHERE id = ? AND user_id = ?')
+            .bind(body.id, user.id)
+            .run();
+          return json({ ok: true });
+        }
+      }
       if (pathname === '/api/portfolio-incomes' && request.method === 'POST') {
         const body = (await request.json()) as {
           portfolio_id: string;
@@ -1288,7 +1654,7 @@ export default {
       if (pathname === '/api/quotes/yahoo' && request.method === 'POST') {
         const body = (await request.json()) as { holding_ids?: string[] };
         const { results: holdings } = await env.DB.prepare(
-          'SELECT * FROM holdings WHERE user_id = ?'
+          'SELECT * FROM holdings WHERE user_id = ? AND quantity > 0'
         )
           .bind(user.id)
           .all<HoldingRecord>();
@@ -1307,31 +1673,45 @@ export default {
 
           if (!canAutoQuoteWithYahoo(asset)) {
             skippedReasons.push(
-              `${asset.ticker}: Prohibido auto-cotizar activos en ARS o CEDEARs desde Yahoo Finance.`
+              `${asset.ticker} (${asset.currency}): Cotización manual (CEDEAR / ARS sujeto a ratio y CCL).`
             );
             continue;
           }
 
           try {
-            const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-              asset.ticker
-            )}?interval=1d&range=1d`;
-            const yRes = await fetch(yahooUrl, {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; PatrimonioContable/2.0)',
-                Accept: 'application/json',
-              },
-            });
-            if (!yRes.ok) continue;
+            const endpoints = [
+              `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+                asset.ticker
+              )}?interval=1d&range=1d`,
+              `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+                asset.ticker
+              )}?interval=1d&range=1d`,
+            ];
 
-            const yData = (await yRes.json()) as {
-              chart?: {
-                result?: Array<{
-                  meta?: { regularMarketPrice?: number };
-                }>;
+            let marketPrice: number | undefined;
+            for (const yahooUrl of endpoints) {
+              const yRes = await fetch(yahooUrl, {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (compatible; PatrimonioContable/2.0)',
+                  Accept: 'application/json',
+                },
+              });
+              if (!yRes.ok) continue;
+
+              const yData = (await yRes.json()) as {
+                chart?: {
+                  result?: Array<{
+                    meta?: { regularMarketPrice?: number };
+                  }>;
+                };
               };
-            };
-            const marketPrice = yData.chart?.result?.[0]?.meta?.regularMarketPrice;
+              const candidate = yData.chart?.result?.[0]?.meta?.regularMarketPrice;
+              if (typeof candidate === 'number' && candidate > 0) {
+                marketPrice = candidate;
+                break;
+              }
+            }
+
             if (typeof marketPrice === 'number' && marketPrice > 0) {
               const priceCents = toCents(marketPrice);
               await env.DB.prepare(

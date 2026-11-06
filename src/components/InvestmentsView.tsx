@@ -1,12 +1,11 @@
 import { useMemo, useState, type FormEvent } from 'react';
-import { Camera, Check, HelpCircle, Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
-import { runBrowserOcr } from '../services/ocrService';
+import { Check, HelpCircle, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import {
   applyTradeToHolding,
   calculateHoldingMetrics,
   calculatePortfolioAllocation,
   canAutoQuoteWithYahoo,
-  parsePortfolioSnapshotText,
+  recalculateHoldingFromTrades,
 } from '../shared/investments';
 import { formatMoney, fromCents, toCents } from '../shared/money';
 import type {
@@ -15,12 +14,10 @@ import type {
   AssetRecord,
   Currency,
   HoldingRecord,
-  ParsedPortfolioSnapshotRow,
   PortfolioCashRecord,
   PortfolioIncomeRecord,
   PortfolioIncomeType,
   PortfolioRecord,
-  PortfolioSnapshotDraftRecord,
   TradeRecord,
   TradeSide,
 } from '../shared/types';
@@ -34,19 +31,34 @@ interface InvestmentsViewProps {
   portfolioCash: ReadonlyArray<PortfolioCashRecord>;
   trades: ReadonlyArray<TradeRecord>;
   portfolioIncomes: ReadonlyArray<PortfolioIncomeRecord>;
-  snapshotDrafts: ReadonlyArray<PortfolioSnapshotDraftRecord>;
   onCreatePortfolio: (input: {
     name: string;
     broker: string | null;
     base_currency: Currency;
   }) => Promise<PortfolioRecord>;
+  onUpdatePortfolio: (input: {
+    id: string;
+    name: string;
+    broker: string | null;
+    base_currency: Currency;
+  }) => Promise<PortfolioRecord>;
+  onDeletePortfolio: (id: string) => Promise<void>;
   onCreateAsset: (input: {
     ticker: string;
     name: string;
     asset_class: AssetClass;
     currency: Currency;
   }) => Promise<AssetRecord>;
+  onUpdateAsset: (input: {
+    id: string;
+    ticker: string;
+    name: string;
+    asset_class: AssetClass;
+    currency: Currency;
+  }) => Promise<AssetRecord>;
+  onDeleteAsset: (id: string) => Promise<void>;
   onUpdateHoldingPrice: (input: { id: string; last_price: number }) => Promise<void>;
+  onDeleteHolding: (id: string) => Promise<void>;
   onUpdatePortfolioCash: (input: {
     portfolio_id: string;
     currency: Currency;
@@ -63,6 +75,17 @@ interface InvestmentsViewProps {
     settlement_account_id: string | null;
     note: string | null;
   }) => Promise<void>;
+  onUpdateTrade: (input: {
+    id: string;
+    side: TradeSide;
+    quantity: number;
+    price: number;
+    fee: number;
+    date: string;
+    settlement_account_id: string | null;
+    note: string | null;
+  }) => Promise<void>;
+  onDeleteTrade: (id: string) => Promise<void>;
   onCreatePortfolioIncome: (input: {
     portfolio_id: string;
     asset_id: string | null;
@@ -72,33 +95,11 @@ interface InvestmentsViewProps {
     date: string;
     note: string | null;
   }) => Promise<void>;
-  onCreateSnapshotDraft: (input: {
-    portfolio_id: string;
-    raw_text: string;
-    rows: ParsedPortfolioSnapshotRow[];
-  }) => Promise<void>;
-  onConfirmSnapshotDraft: (input: {
-    draft_id: string;
-    portfolio_id: string;
-    rows: Array<{
-      ticker: string;
-      asset_name: string;
-      asset_class: AssetClass;
-      quantity: number;
-      avg_cost: number;
-      last_price: number;
-    }>;
-  }) => Promise<void>;
-  onDiscardSnapshotDraft: (draftId: string) => Promise<void>;
+  onDeletePortfolioIncome: (id: string) => Promise<void>;
   onRefreshUsdQuotes: () => Promise<{ updatedCount: number; skippedReasons: string[] }>;
 }
 
-type InvestmentsSubTab =
-  | 'holdings'
-  | 'trades'
-  | 'snapshot'
-  | 'incomes'
-  | 'catalog';
+type InvestmentsSubTab = 'holdings' | 'trades' | 'incomes' | 'catalog';
 
 const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
   stock: 'Acción / ETF',
@@ -132,16 +133,20 @@ export function InvestmentsView({
   portfolioCash,
   trades,
   portfolioIncomes,
-  snapshotDrafts,
   onCreatePortfolio,
+  onUpdatePortfolio,
+  onDeletePortfolio,
   onCreateAsset,
+  onUpdateAsset,
+  onDeleteAsset,
   onUpdateHoldingPrice,
+  onDeleteHolding,
   onUpdatePortfolioCash,
   onRecordTrade,
+  onUpdateTrade,
+  onDeleteTrade,
   onCreatePortfolioIncome,
-  onCreateSnapshotDraft,
-  onConfirmSnapshotDraft,
-  onDiscardSnapshotDraft,
+  onDeletePortfolioIncome,
   onRefreshUsdQuotes,
 }: InvestmentsViewProps) {
   const [subTab, setSubTab] = useState<InvestmentsSubTab>('holdings');
@@ -149,6 +154,9 @@ export function InvestmentsView({
   const [showGlossary, setShowGlossary] = useState<boolean>(false);
   const [allocationCurrency, setAllocationCurrency] = useState<Currency>('ARS');
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  // Confirmación en dos pasos para borrados seguros sin window.confirm
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
   // Estado edición inline de último precio conocido
   const [editingPriceHoldingId, setEditingPriceHoldingId] = useState<string | null>(null);
@@ -158,7 +166,8 @@ export function InvestmentsView({
   const [editingCashKey, setEditingCashKey] = useState<string | null>(null);
   const [editingCashValue, setEditingCashValue] = useState<string>('');
 
-  // Estado formulario operación de compra/venta (Trade)
+  // Estado formulario operación de compra/venta (Alta o Edición de Trade)
+  const [editingTradeId, setEditingTradeId] = useState<string | null>(null);
   const [tradePortfolioId, setTradePortfolioId] = useState<string>(portfolios[0]?.id ?? '');
   const [tradeSide, setTradeSide] = useState<TradeSide>('buy');
   const [tradeAssetId, setTradeAssetId] = useState<string>(assets[0]?.id ?? '');
@@ -169,11 +178,6 @@ export function InvestmentsView({
   const [tradeSettlementAcc, setTradeSettlementAcc] = useState<string>('');
   const [tradeNote, setTradeNote] = useState<string>('');
 
-  // Estado formulario Reconstrucción desde Captura (Staging OCR / Texto)
-  const [snapPortfolioId, setSnapPortfolioId] = useState<string>(portfolios[0]?.id ?? '');
-  const [snapRawText, setSnapRawText] = useState<string>('');
-  const [ocrProgress, setOcrProgress] = useState<number | null>(null);
-
   // Estado formulario Dividendo / Interés
   const [incPortfolioId, setIncPortfolioId] = useState<string>(portfolios[0]?.id ?? '');
   const [incAssetId, setIncAssetId] = useState<string>('');
@@ -183,16 +187,27 @@ export function InvestmentsView({
   const [incDate, setIncDate] = useState<string>(getTodayIso());
   const [incNote, setIncNote] = useState<string>('');
 
-  // Estado formulario Nueva Cartera
+  // Estado formulario Nueva Cartera + Edición de Cartera
   const [newPortName, setNewPortName] = useState<string>('');
   const [newPortBroker, setNewPortBroker] = useState<string>('');
   const [newPortCurrency, setNewPortCurrency] = useState<Currency>('ARS');
 
-  // Estado formulario Nuevo Activo (Maestro)
+  const [editingPortfolioId, setEditingPortfolioId] = useState<string | null>(null);
+  const [editPortName, setEditPortName] = useState<string>('');
+  const [editPortBroker, setEditPortBroker] = useState<string>('');
+  const [editPortCurrency, setEditPortCurrency] = useState<Currency>('ARS');
+
+  // Estado formulario Nuevo Activo + Edición de Activo
   const [newAssetTicker, setNewAssetTicker] = useState<string>('');
   const [newAssetName, setNewAssetName] = useState<string>('');
   const [newAssetClass, setNewAssetClass] = useState<AssetClass>('cedear');
   const [newAssetCurrency, setNewAssetCurrency] = useState<Currency>('ARS');
+
+  const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
+  const [editAssetTicker, setEditAssetTicker] = useState<string>('');
+  const [editAssetName, setEditAssetName] = useState<string>('');
+  const [editAssetClass, setEditAssetClass] = useState<AssetClass>('stock');
+  const [editAssetCurrency, setEditAssetCurrency] = useState<Currency>('USD');
 
   const portfolioMap = useMemo(() => new Map(portfolios.map((p) => [p.id, p])), [portfolios]);
   const assetMap = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets]);
@@ -274,7 +289,7 @@ export function InvestmentsView({
   );
   const activeAllocation = allocationCurrency === 'ARS' ? allocationARS : allocationUSD;
 
-  // Simulador en vivo para el formulario de Compra / Venta
+  // Simulador en vivo para el formulario de Compra / Venta (alta o edición)
   const tradePreview = useMemo(() => {
     const targetPortfolioId = tradePortfolioId || portfolios[0]?.id;
     const targetAssetId = tradeAssetId || assets[0]?.id;
@@ -306,6 +321,41 @@ export function InvestmentsView({
       const grossCents = Math.round(qtyNum * priceCents);
       const totalCents =
         tradeSide === 'buy' ? grossCents + feeCents : Math.max(0, grossCents - feeCents);
+
+      if (editingTradeId) {
+        const pairTrades = trades
+          .filter((t) => t.portfolio_id === targetPortfolioId && t.asset_id === targetAssetId)
+          .map((t) =>
+            t.id === editingTradeId
+              ? {
+                  ...t,
+                  side: tradeSide,
+                  quantity: qtyNum,
+                  price: priceCents,
+                  fee: feeCents,
+                  date: tradeDate,
+                }
+              : t
+          );
+        const recalc = recalculateHoldingFromTrades(
+          pairTrades,
+          existingHolding?.last_price ?? priceCents,
+          existingHolding?.last_price_date ?? tradeDate
+        );
+        const editedTradeResult = recalc.updatedTrades.find((t) => t.id === editingTradeId);
+
+        return {
+          status: 'ready' as const,
+          currency,
+          ticker: asset?.ticker ?? '',
+          currentQty,
+          currentAvgCost,
+          totalCents,
+          newQuantity: recalc.quantity,
+          newAvgCostCents: recalc.avgCostCents,
+          realizedGainCents: editedTradeResult?.realized_gain ?? null,
+        };
+      }
 
       const simulation = applyTradeToHolding({
         currentQuantity: currentQty,
@@ -345,9 +395,12 @@ export function InvestmentsView({
     assetMap,
     portfolioMap,
     holdings,
+    trades,
+    editingTradeId,
     tradeQty,
     tradePrice,
     tradeFee,
+    tradeDate,
     tradeSide,
   ]);
 
@@ -357,11 +410,11 @@ export function InvestmentsView({
       const res = await onRefreshUsdQuotes();
       const skipMsg =
         res.skippedReasons.length > 0
-          ? ` (${res.skippedReasons.length} activos en ARS/CEDEAR omitidos por regla de dominio)`
+          ? ` Se omitieron ${res.skippedReasons.length} posición(es) en ARS/CEDEAR porque cotizan en pesos según ratio de conversión y dólar CCL (editá su "Precio Hoy" con un clic).`
           : '';
       setFeedback({
         type: 'ok',
-        text: `Cotizaciones Yahoo Finance actualizadas para ${res.updatedCount} activos en USD.${skipMsg}`,
+        text: `Cotizaciones Yahoo Finance actualizadas para ${res.updatedCount} activo(s) en USD.${skipMsg}`,
       });
     } catch (e) {
       setFeedback({
@@ -369,6 +422,29 @@ export function InvestmentsView({
         text: e instanceof Error ? e.message : 'Error al consultar Yahoo Finance.',
       });
     }
+  };
+
+  const resetTradeForm = () => {
+    setEditingTradeId(null);
+    setTradeQty('');
+    setTradePrice('');
+    setTradeFee('0');
+    setTradeNote('');
+  };
+
+  const startEditTrade = (tr: TradeRecord) => {
+    setFeedback(null);
+    setEditingTradeId(tr.id);
+    setTradePortfolioId(tr.portfolio_id);
+    setTradeAssetId(tr.asset_id);
+    setTradeSide(tr.side);
+    setTradeQty(String(tr.quantity));
+    setTradePrice(String(fromCents(tr.price)));
+    setTradeFee(String(fromCents(tr.fee)));
+    setTradeDate(tr.date);
+    setTradeSettlementAcc(tr.settlement_account_id ?? '');
+    setTradeNote(tr.note ?? '');
+    setSubTab('trades');
   };
 
   const handleSubmitTrade = async (e: FormEvent) => {
@@ -391,6 +467,25 @@ export function InvestmentsView({
       const priceCents = toCents(tradePrice);
       const feeCents = tradeFee.trim() ? toCents(tradeFee) : 0;
 
+      if (editingTradeId) {
+        await onUpdateTrade({
+          id: editingTradeId,
+          side: tradeSide,
+          quantity: qtyNum,
+          price: priceCents,
+          fee: feeCents,
+          date: tradeDate,
+          settlement_account_id: tradeSettlementAcc || null,
+          note: tradeNote.trim() || null,
+        });
+        resetTradeForm();
+        setFeedback({
+          type: 'ok',
+          text: 'Operación actualizada: se recalcularon automáticamente la tenencia, el Precio Promedio (PPP) y el resultado realizado (RN-02).',
+        });
+        return;
+      }
+
       await onRecordTrade({
         portfolio_id: targetPortfolioId,
         asset_id: targetAssetId,
@@ -403,10 +498,7 @@ export function InvestmentsView({
         note: tradeNote.trim() || null,
       });
 
-      setTradeQty('');
-      setTradePrice('');
-      setTradeFee('0');
-      setTradeNote('');
+      resetTradeForm();
       setFeedback({
         type: 'ok',
         text:
@@ -419,61 +511,6 @@ export function InvestmentsView({
         type: 'err',
         text: err instanceof Error ? err.message : 'Error al registrar operación.',
       });
-    }
-  };
-
-  const handleAnalyzeSnapshot = async (e: FormEvent) => {
-    e.preventDefault();
-    setFeedback(null);
-    const targetPortfolioId = snapPortfolioId || portfolios[0]?.id;
-    const port = portfolioMap.get(targetPortfolioId);
-    if (!port) {
-      setFeedback({ type: 'err', text: 'Seleccioná una cartera destino para la captura.' });
-      return;
-    }
-    if (!snapRawText.trim()) {
-      setFeedback({ type: 'err', text: 'Pegá el texto de la captura o subí una imagen para analizar.' });
-      return;
-    }
-
-    const rows = parsePortfolioSnapshotText(snapRawText, port.base_currency, assets);
-    if (rows.length === 0) {
-      setFeedback({
-        type: 'err',
-        text: 'No se detectaron filas de tenencias. Verificá que cada línea incluya al menos un Ticker o cantidad.',
-      });
-      return;
-    }
-
-    await onCreateSnapshotDraft({
-      portfolio_id: port.id,
-      raw_text: snapRawText,
-      rows,
-    });
-    setSnapRawText('');
-    setFeedback({
-      type: 'ok',
-      text: `Se creó un borrador de cartera en staging con ${rows.length} fila(s) para revisión obligatoria (RN-04).`,
-    });
-  };
-
-  const handleSnapshotImageUpload = async (file: File) => {
-    setFeedback(null);
-    setOcrProgress(5);
-    try {
-      const res = await runBrowserOcr(file, (pct) => setOcrProgress(pct));
-      setSnapRawText(res.text);
-      setFeedback({
-        type: 'ok',
-        text: `OCR completado en navegador (${res.confidence}% confianza). Revisá el texto o generá la tabla de borrador.`,
-      });
-    } catch {
-      setFeedback({
-        type: 'err',
-        text: 'El motor OCR no pudo procesar la imagen. Podés pegar o escribir las filas manualmente abajo.',
-      });
-    } finally {
-      setOcrProgress(null);
     }
   };
 
@@ -526,12 +563,37 @@ export function InvestmentsView({
       setNewPortName('');
       setNewPortBroker('');
       if (!tradePortfolioId) setTradePortfolioId(created.id);
-      if (!snapPortfolioId) setSnapPortfolioId(created.id);
       setFeedback({ type: 'ok', text: `Cartera "${created.name}" creada en ${created.base_currency}.` });
     } catch (err) {
       setFeedback({
         type: 'err',
         text: err instanceof Error ? err.message : 'Error al crear cartera.',
+      });
+    }
+  };
+
+  const handleSavePortfolioEdit = async (id: string) => {
+    setFeedback(null);
+    if (!editPortName.trim()) {
+      setFeedback({ type: 'err', text: 'El nombre de la cartera es obligatorio.' });
+      return;
+    }
+    try {
+      const updated = await onUpdatePortfolio({
+        id,
+        name: editPortName.trim(),
+        broker: editPortBroker.trim() || null,
+        base_currency: editPortCurrency,
+      });
+      setEditingPortfolioId(null);
+      setFeedback({
+        type: 'ok',
+        text: `Cartera "${updated.name}" actualizada correctamente.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Error al modificar cartera.',
       });
     }
   };
@@ -565,6 +627,33 @@ export function InvestmentsView({
     }
   };
 
+  const handleSaveAssetEdit = async (id: string) => {
+    setFeedback(null);
+    if (!editAssetTicker.trim() || !editAssetName.trim()) {
+      setFeedback({ type: 'err', text: 'El ticker y el nombre del activo son obligatorios.' });
+      return;
+    }
+    try {
+      const updated = await onUpdateAsset({
+        id,
+        ticker: editAssetTicker.trim().toUpperCase(),
+        name: editAssetName.trim(),
+        asset_class: editAssetClass,
+        currency: editAssetCurrency,
+      });
+      setEditingAssetId(null);
+      setFeedback({
+        type: 'ok',
+        text: `Activo ${updated.ticker} (${updated.name}) actualizado correctamente.`,
+      });
+    } catch (err) {
+      setFeedback({
+        type: 'err',
+        text: err instanceof Error ? err.message : 'Error al modificar activo.',
+      });
+    }
+  };
+
   return (
     <div className="space-y-8">
       {/* Encabezado y Acciones Superiores */}
@@ -581,7 +670,7 @@ export function InvestmentsView({
               className="btn-accent-soft py-1 px-2.5 text-xs"
             >
               <HelpCircle className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>{showGlossary ? 'Ocultar diccionario simple' : '¿Qué significan estos términos?'}</span>
+              <span>{showGlossary ? 'Ocultar guía y reglas' : '¿Qué significan estos términos y Yahoo USD?'}</span>
             </button>
           </div>
         </div>
@@ -598,7 +687,7 @@ export function InvestmentsView({
         </div>
       </div>
 
-      {/* Diccionario simple para personas no economistas */}
+      {/* Diccionario simple + Explicación de Regla de Dominio de Yahoo Finance */}
       {showGlossary && (
         <section
           aria-label="Explicación simple de términos de inversión"
@@ -611,21 +700,21 @@ export function InvestmentsView({
             </p>
           </div>
           <div className="space-y-1">
-            <p className="font-semibold text-slate-900">2. Resultado Latente (No vendido)</p>
+            <p className="font-semibold text-slate-900">2. Resultado Latente vs. Realizado</p>
             <p>
-              Es lo que vas ganando o perdiendo "en los papeles" según el precio de hoy, pero sin haber vendido todavía tus activos.
+              <strong>Latente</strong> es lo que ganás o perdés según el precio de hoy sin haber vendido. <strong>Realizado</strong> es la ganancia o pérdida definitiva al vender (sin alterar el PPP de las unidades restantes, RN-02).
             </p>
           </div>
           <div className="space-y-1">
-            <p className="font-semibold text-slate-900">3. Resultado Realizado (Al vender)</p>
+            <p className="font-semibold text-slate-900">3. Efectivo en Broker</p>
             <p>
-              Cuando vendés una parte o todo, la ganancia o pérdida se vuelve real. El costo promedio de las unidades que te quedan no se altera (RN-02).
+              Es el dinero líquido que ya está dentro de tu cuenta de inversión (ej. IOL, Balanz, IBKR) listo para comprar activos o retirar.
             </p>
           </div>
           <div className="space-y-1">
-            <p className="font-semibold text-slate-900">4. Efectivo en Broker</p>
+            <p className="font-semibold text-slate-900">4. ¿Por qué Yahoo solo cotiza USD?</p>
             <p>
-              Es el dinero que ya transferiste a tu cuenta de inversión (ej. IOL, Balanz, PPI) y está listo para invertir o retirar.
+              Los CEDEARs y bonos en <strong>ARS</strong> dependen del ratio de conversión (ej. 10:1) y del dólar CCL del día. Tomar el precio en USD de Wall Street daría un valor falso en pesos. Por eso Yahoo actualiza activos en <strong>USD</strong> y en ARS editás el <em>Precio Hoy</em> con un clic.
             </p>
           </div>
         </section>
@@ -772,19 +861,7 @@ export function InvestmentsView({
                 : 'text-slate-700 hover:bg-white hover:text-slate-900'
             }`}
           >
-            Operar Compra / Venta
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubTab('snapshot')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-              subTab === 'snapshot'
-                ? 'bg-indigo-600 text-white shadow-xs'
-                : 'text-slate-700 hover:bg-white hover:text-slate-900'
-            }`}
-          >
-            Reconstruir por Captura
-            {snapshotDrafts.length > 0 ? ` (${snapshotDrafts.length})` : ''}
+            Operar Compra / Venta ({trades.length})
           </button>
           <button
             type="button"
@@ -940,7 +1017,7 @@ export function InvestmentsView({
                   Detalle de tus Inversiones (Posiciones en Cartera)
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Hacé clic sobre el "Precio Hoy" de cualquier activo para actualizar su cotización manualmente.
+                  Hacé clic sobre el "Precio Hoy" de cualquier activo para actualizar su cotización manualmente o gestioná sus operaciones en "Operar Compra / Venta".
                 </p>
               </div>
             </div>
@@ -954,16 +1031,9 @@ export function InvestmentsView({
                   <button
                     type="button"
                     onClick={() => setSubTab('trades')}
-                    className="py-2 px-3.5 rounded-lg bg-slate-900 text-white text-xs font-medium hover:bg-slate-800 cursor-pointer"
+                    className="btn-primary py-2 px-4 text-xs"
                   >
                     Registrar Compra
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSubTab('snapshot')}
-                    className="py-2 px-3.5 rounded-lg border border-slate-200 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 cursor-pointer"
-                  >
-                    Importar Captura de Broker
                   </button>
                 </div>
               </div>
@@ -987,10 +1057,11 @@ export function InvestmentsView({
                         <div>Cuánto Vale Hoy</div>
                         <div className="text-[10px] font-normal text-slate-400">vs. Invertido</div>
                       </th>
-                      <th className="py-2.5 pl-3 text-right">
+                      <th className="py-2.5 px-3 text-right">
                         <div>Ganancia / Pérdida</div>
                         <div className="text-[10px] font-normal text-slate-400">Latente hoy</div>
                       </th>
+                      <th className="py-2.5 pl-3 text-right">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
@@ -1000,6 +1071,7 @@ export function InvestmentsView({
                       const currency = asset?.currency ?? port?.base_currency ?? 'ARS';
                       const metrics = calculateHoldingMetrics(h);
                       const isEditingPrice = editingPriceHoldingId === h.id;
+                      const delKey = `holding:${h.id}`;
 
                       return (
                         <tr key={h.id} className="hover:bg-slate-50/80">
@@ -1057,6 +1129,14 @@ export function InvestmentsView({
                                 >
                                   <Check className="w-3.5 h-3.5" />
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingPriceHoldingId(null)}
+                                  className="btn-secondary p-1.5 text-xs"
+                                  aria-label="Cancelar edición de precio"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             ) : (
                               <div>
@@ -1071,7 +1151,8 @@ export function InvestmentsView({
                                   {formatMoney(h.last_price, currency)}
                                 </button>
                                 <div className="text-[11px] text-slate-400 whitespace-nowrap mt-1">
-                                  {h.last_price_date ?? 'Sin fecha'} · {asset && canAutoQuoteWithYahoo(asset) ? 'Yahoo USD' : 'Manual'}
+                                  {h.last_price_date ?? 'Sin fecha'} ·{' '}
+                                  {asset && canAutoQuoteWithYahoo(asset) ? 'Yahoo USD' : 'Manual (ARS/CCL)'}
                                 </div>
                               </div>
                             )}
@@ -1085,7 +1166,7 @@ export function InvestmentsView({
                             </div>
                           </td>
                           <td
-                            className={`py-3 pl-3 text-right font-mono tabular-nums font-medium ${
+                            className={`py-3 px-3 text-right font-mono tabular-nums font-medium ${
                               metrics.unrealizedGainCents >= 0 ? 'text-emerald-700' : 'text-red-700'
                             }`}
                           >
@@ -1097,6 +1178,52 @@ export function InvestmentsView({
                               ({metrics.unrealizedGainPct >= 0 ? '+' : ''}
                               {metrics.unrealizedGainPct}%)
                             </div>
+                          </td>
+                          <td className="py-3 pl-3 text-right whitespace-nowrap">
+                            {confirmDeleteKey === delKey ? (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await onDeleteHolding(h.id);
+                                      setConfirmDeleteKey(null);
+                                      setFeedback({
+                                        type: 'ok',
+                                        text: `Posición de ${asset?.ticker ?? 'activo'} eliminada.`,
+                                      });
+                                    } catch (err) {
+                                      setFeedback({
+                                        type: 'err',
+                                        text:
+                                          err instanceof Error
+                                            ? err.message
+                                            : 'Error al eliminar tenencia.',
+                                      });
+                                    }
+                                  }}
+                                  className="btn-danger-soft py-1 px-2 text-xs"
+                                >
+                                  Confirmar
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteKey(null)}
+                                  className="btn-secondary py-1 px-2 text-xs"
+                                >
+                                  Cancelar
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(delKey)}
+                                className="btn-danger-soft py-1 px-2 text-xs"
+                                aria-label={`Eliminar tenencia ${asset?.ticker ?? ''}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1199,15 +1326,31 @@ export function InvestmentsView({
         </div>
       )}
 
-      {/* SUB-VISTA 2: OPERAR COMPRA / VENTA (TRADES - RN-02) */}
+      {/* SUB-VISTA 2: OPERAR COMPRA / VENTA (TRADES - RN-02 CON EDICIÓN Y BORRADO) */}
       {subTab === 'trades' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <section className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-6">
-            <h2 className="text-base font-semibold text-slate-900 mb-1">
-              Registrar Compra o Venta de un Activo
-            </h2>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <h2 className="text-base font-semibold text-slate-900">
+                {editingTradeId
+                  ? 'Editar Operación Registrada'
+                  : 'Registrar Compra o Venta de un Activo'}
+              </h2>
+              {editingTradeId && (
+                <button
+                  type="button"
+                  onClick={resetTradeForm}
+                  className="btn-secondary py-1 px-2.5 text-xs"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>Cancelar edición</span>
+                </button>
+              )}
+            </div>
             <p className="text-xs text-slate-500 mb-4">
-              Cargá tu operación y mirá en el simulador inferior cómo quedará tu inversión antes de confirmar.
+              {editingTradeId
+                ? 'Modificá los datos de la operación: el sistema recalculará automáticamente el Precio Promedio (PPP) y el resultado realizado (RN-02).'
+                : 'Cargá tu operación y mirá en el simulador inferior cómo quedará tu inversión antes de confirmar.'}
             </p>
 
             <form onSubmit={handleSubmitTrade} className="space-y-4">
@@ -1243,8 +1386,9 @@ export function InvestmentsView({
                 <select
                   id="trade-portfolio"
                   value={tradePortfolioId}
+                  disabled={Boolean(editingTradeId)}
                   onChange={(e) => setTradePortfolioId(e.target.value)}
-                  className="w-full py-2 px-3 text-sm rounded-lg border border-slate-200 bg-white text-slate-900"
+                  className="w-full py-2 px-3 text-sm rounded-lg border border-slate-200 bg-white text-slate-900 disabled:opacity-60"
                 >
                   {portfolios.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -1261,8 +1405,9 @@ export function InvestmentsView({
                 <select
                   id="trade-asset"
                   value={tradeAssetId}
+                  disabled={Boolean(editingTradeId)}
                   onChange={(e) => setTradeAssetId(e.target.value)}
-                  className="w-full py-2 px-3 text-sm rounded-lg border border-slate-200 bg-white text-slate-900"
+                  className="w-full py-2 px-3 text-sm rounded-lg border border-slate-200 bg-white text-slate-900 disabled:opacity-60"
                 >
                   {assets.map((a) => (
                     <option key={a.id} value={a.id}>
@@ -1331,7 +1476,7 @@ export function InvestmentsView({
                 </div>
               </div>
 
-              {/* Simulador de Impacto en Vivo (UX para no economistas) */}
+              {/* Simulador de Impacto en Vivo */}
               {tradePreview && (
                 <div
                   data-testid="trade-live-preview"
@@ -1370,9 +1515,9 @@ export function InvestmentsView({
                         </span>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-slate-600">Nueva cantidad en cartera:</span>
+                        <span className="text-slate-600">Cantidad resultante en cartera:</span>
                         <span className="font-mono tabular-nums font-medium text-slate-900">
-                          {tradePreview.currentQty} → {tradePreview.newQuantity} u.
+                          {tradePreview.newQuantity} u.
                         </span>
                       </div>
                       {tradeSide === 'buy' ? (
@@ -1442,202 +1587,173 @@ export function InvestmentsView({
                 type="submit"
                 className="btn-primary w-full py-2.5 px-4 text-sm"
               >
-                {tradeSide === 'buy' ? 'Confirmar Compra' : 'Confirmar Venta'}
+                {editingTradeId
+                  ? 'Guardar Cambios en Operación'
+                  : tradeSide === 'buy'
+                  ? 'Confirmar Compra'
+                  : 'Confirmar Venta'}
               </button>
             </form>
           </section>
 
-          {/* Historial de Operaciones (Trades) */}
-          <section className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6">
-            <h2 className="text-base font-semibold text-slate-900 mb-4">
-              Historial de Compras y Ventas
-            </h2>
+          {/* Historial de Operaciones (Trades) con Editar y Eliminar */}
+          <section className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-5 sm:p-6 self-start">
+            <div className="mb-3">
+              <h2 className="text-base font-semibold text-slate-900">
+                Historial de Compras y Ventas
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Modificá o eliminá cualquier operación; la tenencia y el PPP se recalculan automáticamente (RN-02).
+              </p>
+            </div>
 
             {trades.length === 0 ? (
               <p className="py-8 text-center text-sm text-slate-500">
                 No hay operaciones registradas todavía.
               </p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
-                      <th className="py-2 pr-3">Fecha</th>
-                      <th className="py-2 px-3">Operación</th>
-                      <th className="py-2 px-3 text-right">Cantidad</th>
-                      <th className="py-2 px-3 text-right">Precio Unit.</th>
-                      <th className="py-2 pl-3 text-right">Ganancia / Pérdida Realizada</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-sm">
-                    {trades.map((tr) => {
-                      const asset = assetMap.get(tr.asset_id);
-                      const port = portfolioMap.get(tr.portfolio_id);
-                      const settlement = tr.settlement_account_id
-                        ? accountMap.get(tr.settlement_account_id)
-                        : undefined;
-                      const currency = asset?.currency ?? port?.base_currency ?? 'ARS';
+              <div className="space-y-2">
+                {trades.map((tr) => {
+                  const asset = assetMap.get(tr.asset_id);
+                  const port = portfolioMap.get(tr.portfolio_id);
+                  const settlement = tr.settlement_account_id
+                    ? accountMap.get(tr.settlement_account_id)
+                    : undefined;
+                  const currency = asset?.currency ?? port?.base_currency ?? 'ARS';
+                  const delKey = `trade:${tr.id}`;
+                  const grossTotalCents = Math.round(tr.quantity * tr.price);
 
-                      return (
-                        <tr key={tr.id} className="hover:bg-slate-50/80">
-                          <td className="py-2.5 pr-3 font-mono text-xs text-slate-500 whitespace-nowrap tabular-nums">
+                  return (
+                    <div
+                      key={tr.id}
+                      className="p-3 rounded-lg border border-slate-200 bg-slate-50/60 hover:bg-slate-100 dark:bg-slate-900/70 dark:border-slate-800 dark:hover:bg-slate-800/90 transition-colors space-y-1.5"
+                    >
+                      {/* Línea 1: Tipo + Ticker + Fecha + Cartera (Izquierda) | Botones compactos (Derecha) */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold leading-none shrink-0 ${
+                              tr.side === 'buy'
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : 'bg-amber-50 text-amber-700 border border-amber-200'
+                            }`}
+                          >
+                            {tr.side === 'buy' ? 'Compra' : 'Venta'}
+                          </span>
+                          <span className="font-mono font-semibold text-sm text-slate-900 shrink-0">
+                            {asset?.ticker ?? tr.asset_id}
+                          </span>
+                          <span className="text-xs font-mono text-slate-400 tabular-nums shrink-0">
                             {tr.date}
-                          </td>
-                          <td className="py-2.5 px-3">
-                            <div className="font-medium text-slate-900">
-                              <span
-                                className={
-                                  tr.side === 'buy' ? 'text-emerald-700' : 'text-amber-700'
-                                }
+                          </span>
+                          {port && (
+                            <span className="text-xs text-slate-500 truncate">
+                              · {port.name}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="shrink-0">
+                          {confirmDeleteKey === delKey ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await onDeleteTrade(tr.id);
+                                    if (editingTradeId === tr.id) resetTradeForm();
+                                    setConfirmDeleteKey(null);
+                                    setFeedback({
+                                      type: 'ok',
+                                      text: 'Operación eliminada y tenencia recalculada.',
+                                    });
+                                  } catch (err) {
+                                    setConfirmDeleteKey(null);
+                                    setFeedback({
+                                      type: 'err',
+                                      text:
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'No se pudo eliminar la operación.',
+                                    });
+                                  }
+                                }}
+                                className="btn-danger-soft py-1 px-2 text-[11px]"
                               >
-                                {tr.side === 'buy' ? 'Compra' : 'Venta'}
-                              </span>{' '}
-                              · <span className="font-mono">{asset?.ticker ?? tr.asset_id}</span>
+                                Confirmar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(null)}
+                                className="btn-secondary py-1 px-2 text-[11px]"
+                              >
+                                Cancelar
+                              </button>
                             </div>
-                            <div className="text-xs text-slate-500">
-                              {port?.name}
-                              {settlement ? ` · Liq: ${settlement.name}` : ''}
-                              {tr.note ? ` · ${tr.note}` : ''}
+                          ) : (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => startEditTrade(tr)}
+                                className="btn-secondary py-1 px-2 text-[11px]"
+                                title={`Editar operación de ${asset?.ticker ?? 'activo'}`}
+                                aria-label={`Editar operación de ${asset?.ticker ?? 'activo'}`}
+                              >
+                                <Pencil className="w-3 h-3" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(delKey)}
+                                className="btn-danger-soft py-1 px-1.5 text-[11px]"
+                                title={`Eliminar operación de ${asset?.ticker ?? 'activo'}`}
+                                aria-label={`Eliminar operación de ${asset?.ticker ?? 'activo'}`}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
                             </div>
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-900">
-                            {tr.quantity}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums text-slate-700">
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Línea 2: Liquidación y Nota (Izquierda) | Cantidad × Precio y Total/Resultado (Derecha) */}
+                      <div className="flex items-center justify-between gap-3 text-xs">
+                        <div className="text-slate-500 truncate min-w-0 flex-1">
+                          {settlement ? `Liq: ${settlement.name}` : 'Sin cuenta liq.'}
+                          {tr.note ? ` · ${tr.note}` : ''}
+                        </div>
+
+                        <div className="font-mono tabular-nums text-right shrink-0 flex items-center gap-2">
+                          <span className="text-slate-700">
+                            <strong className="font-semibold text-slate-900">{tr.quantity} u.</strong> ×{' '}
                             {formatMoney(tr.price, currency)}
-                          </td>
-                          <td className="py-2.5 pl-3 text-right font-mono tabular-nums">
-                            {tr.realized_gain !== null ? (
-                              <span
-                                className={`font-medium ${
-                                  tr.realized_gain >= 0 ? 'text-emerald-700' : 'text-red-700'
-                                }`}
-                              >
-                                {tr.realized_gain >= 0 ? '+' : ''}
-                                {formatMoney(tr.realized_gain, currency)}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-slate-400">—</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                          </span>
+                          {tr.realized_gain !== null ? (
+                            <span
+                              className={`font-semibold ${
+                                tr.realized_gain >= 0 ? 'text-emerald-700' : 'text-red-700'
+                              }`}
+                            >
+                              · {tr.realized_gain >= 0 ? '+' : ''}
+                              {formatMoney(tr.realized_gain, currency)}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">
+                              ({formatMoney(grossTotalCents, currency)})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>
         </div>
       )}
 
-      {/* SUB-VISTA 3: RECONSTRUCCIÓN DE CARTERA POR CAPTURA (STAGING RN-04 + RN-05) */}
-      {subTab === 'snapshot' && (
-        <div className="space-y-6">
-          <section className="bg-white border border-slate-200 rounded-xl p-6">
-            <h2 className="text-base font-semibold text-slate-900 mb-1">
-              Reconstrucción de Cartera desde Captura de Broker (OCR / Texto)
-            </h2>
-            <p className="text-xs text-slate-500 mb-4">
-              Subí una captura de pantalla de tu broker o pegá las líneas de tu tenencia. El sistema limpia porcentajes automáticamente y te muestra una tabla editable para que revises todo antes de guardar (RN-04 y RN-05).
-            </p>
-
-            <form onSubmit={handleAnalyzeSnapshot} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="snap-portfolio" className="block text-xs font-medium text-slate-700 mb-1">
-                    Cartera Destino
-                  </label>
-                  <select
-                    id="snap-portfolio"
-                    value={snapPortfolioId}
-                    onChange={(e) => setSnapPortfolioId(e.target.value)}
-                    className="w-full py-2 px-3 text-sm rounded-lg border border-slate-200 bg-white text-slate-900"
-                  >
-                    {portfolios.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} ({p.base_currency})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <span className="block text-xs font-medium text-slate-700 mb-1">
-                    Imagen de Captura (Opcional — Tesseract.js Local)
-                  </span>
-                  <label className="inline-flex items-center gap-2 py-2 px-3.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-700 text-xs font-medium hover:bg-slate-100 cursor-pointer">
-                    <Camera className="w-4 h-4" aria-hidden="true" />
-                    <span>
-                      {ocrProgress !== null
-                        ? `Procesando OCR (${ocrProgress}%)...`
-                        : 'Seleccionar imagen de portafolio'}
-                    </span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) void handleSnapshotImageUpload(file);
-                      }}
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <div>
-                <label htmlFor="snap-raw-text" className="block text-xs font-medium text-slate-700 mb-1">
-                  Texto de Tenencias (1 activo por línea: Ticker, Cantidad, Costo Promedio, Precio Actual)
-                </label>
-                <textarea
-                  id="snap-raw-text"
-                  rows={4}
-                  placeholder={`Ejemplo:\nAAPL 15 0,000 % 18.500,00 +12,45% 21.400,00\nGGAL 100 -1,20% 10580 11200`}
-                  value={snapRawText}
-                  onChange={(e) => setSnapRawText(e.target.value)}
-                  className="w-full p-3 text-sm font-mono rounded-lg border border-slate-200 bg-white text-slate-900"
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="btn-primary py-2 px-4 text-sm"
-              >
-                <Upload className="w-4 h-4" aria-hidden="true" />
-                <span>Generar Borrador de Cartera en Revisión</span>
-              </button>
-            </form>
-          </section>
-
-          {/* Tabla Editable de Borradores de Captura de Portafolio */}
-          {snapshotDrafts.map((draft) => (
-            <SnapshotDraftReviewCard
-              key={draft.id}
-              draft={draft}
-              portfolio={portfolioMap.get(draft.portfolio_id)}
-              onConfirm={async (rows) => {
-                await onConfirmSnapshotDraft({
-                  draft_id: draft.id,
-                  portfolio_id: draft.portfolio_id,
-                  rows,
-                });
-                setFeedback({
-                  type: 'ok',
-                  text: 'Tenencias reconstruidas y confirmadas en bloque correctamente.',
-                });
-                setSubTab('holdings');
-              }}
-              onDiscard={async () => {
-                await onDiscardSnapshotDraft(draft.id);
-                setFeedback({ type: 'ok', text: 'Borrador de captura descartado.' });
-              }}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* SUB-VISTA 4: DIVIDENDOS E INTERESES (PORTFOLIO INCOMES) */}
+      {/* SUB-VISTA 3: DIVIDENDOS E INTERESES (PORTFOLIO INCOMES) */}
       {subTab === 'incomes' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <section className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-6">
@@ -1791,13 +1907,15 @@ export function InvestmentsView({
                     <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
                       <th className="py-2 pr-3">Fecha</th>
                       <th className="py-2 px-3">Concepto</th>
-                      <th className="py-2 pl-3 text-right">Importe</th>
+                      <th className="py-2 px-3 text-right">Importe</th>
+                      <th className="py-2 pl-3 text-right">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
                     {portfolioIncomes.map((inc) => {
                       const port = portfolioMap.get(inc.portfolio_id);
                       const asset = inc.asset_id ? assetMap.get(inc.asset_id) : undefined;
+                      const delKey = `inc:${inc.id}`;
                       return (
                         <tr key={inc.id} className="hover:bg-slate-50/80">
                           <td className="py-2.5 pr-3 font-mono text-xs text-slate-500 whitespace-nowrap tabular-nums">
@@ -1813,8 +1931,54 @@ export function InvestmentsView({
                               {inc.note ? ` · ${inc.note}` : ''}
                             </div>
                           </td>
-                          <td className="py-2.5 pl-3 text-right font-mono tabular-nums font-medium text-emerald-700 whitespace-nowrap">
+                          <td className="py-2.5 px-3 text-right font-mono tabular-nums font-medium text-emerald-700 whitespace-nowrap">
                             +{formatMoney(inc.amount, inc.currency)}
+                          </td>
+                          <td className="py-2.5 pl-3 text-right whitespace-nowrap">
+                            {confirmDeleteKey === delKey ? (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await onDeletePortfolioIncome(inc.id);
+                                      setConfirmDeleteKey(null);
+                                      setFeedback({
+                                        type: 'ok',
+                                        text: 'Rendimiento eliminado correctamente.',
+                                      });
+                                    } catch (err) {
+                                      setFeedback({
+                                        type: 'err',
+                                        text:
+                                          err instanceof Error
+                                            ? err.message
+                                            : 'Error al eliminar rendimiento.',
+                                      });
+                                    }
+                                  }}
+                                  className="btn-danger-soft py-1 px-2 text-xs"
+                                >
+                                  Confirmar
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteKey(null)}
+                                  className="btn-secondary py-1 px-2 text-xs"
+                                >
+                                  Cancelar
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(delKey)}
+                                className="btn-danger-soft py-1 px-2 text-xs"
+                                aria-label="Eliminar rendimiento"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -1827,10 +1991,10 @@ export function InvestmentsView({
         </div>
       )}
 
-      {/* SUB-VISTA 5: MAESTRO DE CARTERAS Y ACTIVOS */}
+      {/* SUB-VISTA 4: MAESTRO DE CARTERAS Y ACTIVOS (CON EDICIÓN Y BORRADO) */}
       {subTab === 'catalog' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Alta de Cartera */}
+          {/* Alta y Gestión de Carteras */}
           <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
             <div>
               <h2 className="text-base font-semibold text-slate-900 mb-1">
@@ -1901,27 +2065,146 @@ export function InvestmentsView({
                 Carteras Registradas ({portfolios.length})
               </h3>
               <ul className="divide-y divide-slate-100 text-sm">
-                {portfolios.map((p) => (
-                  <li key={p.id} className="py-2.5 flex items-center justify-between">
-                    <div>
-                      <span className="font-medium text-slate-900">{p.name}</span>
-                      {p.broker && <span className="text-xs text-slate-500"> · {p.broker}</span>}
-                    </div>
-                    <span className="font-mono text-xs text-slate-600">{p.base_currency}</span>
-                  </li>
-                ))}
+                {portfolios.map((p) => {
+                  const isEditing = editingPortfolioId === p.id;
+                  const delKey = `port:${p.id}`;
+
+                  return (
+                    <li key={p.id} className="py-3">
+                      {isEditing ? (
+                        <div className="space-y-3 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <input
+                              type="text"
+                              aria-label="Editar nombre de cartera"
+                              value={editPortName}
+                              onChange={(e) => setEditPortName(e.target.value)}
+                              className="py-1.5 px-2.5 text-xs rounded border border-slate-300 bg-white text-slate-900"
+                              placeholder="Nombre de cartera"
+                            />
+                            <input
+                              type="text"
+                              aria-label="Editar broker de cartera"
+                              value={editPortBroker}
+                              onChange={(e) => setEditPortBroker(e.target.value)}
+                              className="py-1.5 px-2.5 text-xs rounded border border-slate-300 bg-white text-slate-900"
+                              placeholder="Broker"
+                            />
+                            <select
+                              aria-label="Editar moneda de cartera"
+                              value={editPortCurrency}
+                              onChange={(e) => setEditPortCurrency(e.target.value as Currency)}
+                              className="py-1.5 px-2.5 text-xs font-mono rounded border border-slate-300 bg-white text-slate-900"
+                            >
+                              <option value="ARS">ARS</option>
+                              <option value="USD">USD</option>
+                            </select>
+                          </div>
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleSavePortfolioEdit(p.id)}
+                              className="btn-primary py-1 px-2.5 text-xs"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Guardar</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingPortfolioId(null)}
+                              className="btn-secondary py-1 px-2.5 text-xs"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <span className="font-medium text-slate-900">{p.name}</span>
+                            {p.broker && <span className="text-xs text-slate-500"> · {p.broker}</span>}
+                            <span className="ml-2 font-mono text-xs text-slate-600">
+                              ({p.base_currency})
+                            </span>
+                          </div>
+                          {confirmDeleteKey === delKey ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await onDeletePortfolio(p.id);
+                                    if (selectedPortfolioId === p.id) setSelectedPortfolioId('ALL');
+                                    setConfirmDeleteKey(null);
+                                    setFeedback({
+                                      type: 'ok',
+                                      text: `Cartera "${p.name}" y sus registros asociados fueron eliminados.`,
+                                    });
+                                  } catch (err) {
+                                    setFeedback({
+                                      type: 'err',
+                                      text:
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'Error al eliminar cartera.',
+                                    });
+                                  }
+                                }}
+                                className="btn-danger-soft py-1 px-2 text-xs"
+                              >
+                                Confirmar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(null)}
+                                className="btn-secondary py-1 px-2 text-xs"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingPortfolioId(p.id);
+                                  setEditPortName(p.name);
+                                  setEditPortBroker(p.broker ?? '');
+                                  setEditPortCurrency(p.base_currency);
+                                }}
+                                className="btn-secondary py-1 px-2 text-xs"
+                                aria-label={`Editar cartera ${p.name}`}
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(delKey)}
+                                className="btn-danger-soft py-1 px-2 text-xs"
+                                aria-label={`Eliminar cartera ${p.name}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           </section>
 
-          {/* Maestro de Activos */}
+          {/* Maestro de Activos con Edición y Borrado */}
           <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
             <div>
               <h2 className="text-base font-semibold text-slate-900 mb-1">
                 Catálogo de Activos Financieros
               </h2>
               <p className="text-xs text-slate-500">
-                Si querés invertir en una acción, CEDEAR, bono o cripto que aún no está en la lista, agregalo acá por su código (Ticker).
+                Si querés invertir en una acción, CEDEAR, bono o cripto que aún no está en la lista, agregalo acá o editá los existentes.
               </p>
             </div>
 
@@ -1965,10 +2248,16 @@ export function InvestmentsView({
                   <select
                     id="new-asset-class"
                     value={newAssetClass}
-                    onChange={(e) => setNewAssetClass(e.target.value as AssetClass)}
+                    onChange={(e) => {
+                      const nextClass = e.target.value as AssetClass;
+                      setNewAssetClass(nextClass);
+                      if (nextClass === 'cedear') {
+                        setNewAssetCurrency('ARS');
+                      }
+                    }}
                     className="w-full py-2 px-3 text-sm rounded-lg border border-slate-200 bg-white text-slate-900"
                   >
-                    <option value="cedear">CEDEAR</option>
+                    <option value="cedear">CEDEAR (Cotiza en ARS)</option>
                     <option value="stock">Acción / ETF</option>
                     <option value="bond">Bono / Obligación Negociable</option>
                     <option value="fci">Fondo Común de Inversión (FCI)</option>
@@ -1983,11 +2272,17 @@ export function InvestmentsView({
                   <select
                     id="new-asset-curr"
                     value={newAssetCurrency}
-                    onChange={(e) => setNewAssetCurrency(e.target.value as Currency)}
+                    onChange={(e) => {
+                      const nextCurr = e.target.value as Currency;
+                      setNewAssetCurrency(nextCurr);
+                      if (nextCurr === 'USD' && newAssetClass === 'cedear') {
+                        setNewAssetClass('stock');
+                      }
+                    }}
                     className="w-full py-2 px-3 text-sm font-mono rounded-lg border border-slate-200 bg-white text-slate-900"
                   >
                     <option value="ARS">ARS</option>
-                    <option value="USD">USD</option>
+                    <option value="USD">USD (Auto-cotiza Yahoo)</option>
                   </select>
                 </div>
               </div>
@@ -2005,281 +2300,167 @@ export function InvestmentsView({
               <h3 className="text-xs font-semibold text-slate-500 mb-2">
                 Activos Registrados ({assets.length})
               </h3>
-              <ul className="divide-y divide-slate-100 text-sm max-h-56 overflow-y-auto">
-                {assets.map((a) => (
-                  <li key={a.id} className="py-2 flex items-center justify-between">
-                    <div>
-                      <span className="font-mono font-semibold text-slate-900">{a.ticker}</span>
-                      <span className="text-slate-600"> · {a.name}</span>
-                    </div>
-                    <span className="text-xs text-slate-500">
-                      {ASSET_CLASS_LABELS[a.asset_class]} · {a.currency}
-                    </span>
-                  </li>
-                ))}
+              <ul className="divide-y divide-slate-100 text-sm max-h-72 overflow-y-auto">
+                {assets.map((a) => {
+                  const isEditing = editingAssetId === a.id;
+                  const delKey = `asset:${a.id}`;
+
+                  return (
+                    <li key={a.id} className="py-2.5">
+                      {isEditing ? (
+                        <div className="space-y-3 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <input
+                              type="text"
+                              aria-label="Editar ticker de activo"
+                              value={editAssetTicker}
+                              onChange={(e) => setEditAssetTicker(e.target.value.toUpperCase())}
+                              className="py-1.5 px-2.5 text-xs font-mono uppercase rounded border border-slate-300 bg-white text-slate-900"
+                              placeholder="Ticker"
+                            />
+                            <input
+                              type="text"
+                              aria-label="Editar nombre de activo"
+                              value={editAssetName}
+                              onChange={(e) => setEditAssetName(e.target.value)}
+                              className="py-1.5 px-2.5 text-xs rounded border border-slate-300 bg-white text-slate-900"
+                              placeholder="Nombre"
+                            />
+                            <select
+                              aria-label="Editar clase de activo"
+                              value={editAssetClass}
+                              onChange={(e) => {
+                                const nextClass = e.target.value as AssetClass;
+                                setEditAssetClass(nextClass);
+                                if (nextClass === 'cedear') setEditAssetCurrency('ARS');
+                              }}
+                              className="py-1.5 px-2.5 text-xs rounded border border-slate-300 bg-white text-slate-900"
+                            >
+                              <option value="cedear">CEDEAR</option>
+                              <option value="stock">Acción / ETF</option>
+                              <option value="bond">Bono / ON</option>
+                              <option value="fci">Fondo Común (FCI)</option>
+                              <option value="crypto">Cripto</option>
+                              <option value="other">Otro</option>
+                            </select>
+                            <select
+                              aria-label="Editar moneda de activo"
+                              value={editAssetCurrency}
+                              onChange={(e) => {
+                                const nextCurr = e.target.value as Currency;
+                                setEditAssetCurrency(nextCurr);
+                                if (nextCurr === 'USD' && editAssetClass === 'cedear') {
+                                  setEditAssetClass('stock');
+                                }
+                              }}
+                              className="py-1.5 px-2.5 text-xs font-mono rounded border border-slate-300 bg-white text-slate-900"
+                            >
+                              <option value="ARS">ARS</option>
+                              <option value="USD">USD</option>
+                            </select>
+                          </div>
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleSaveAssetEdit(a.id)}
+                              className="btn-primary py-1 px-2.5 text-xs"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Guardar</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingAssetId(null)}
+                              className="btn-secondary py-1 px-2.5 text-xs"
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <span className="font-mono font-semibold text-slate-900">
+                              {a.ticker}
+                            </span>
+                            <span className="text-slate-600"> · {a.name}</span>
+                            <div className="text-xs text-slate-500">
+                              {ASSET_CLASS_LABELS[a.asset_class]} · {a.currency}
+                              {canAutoQuoteWithYahoo(a) ? ' · Yahoo USD' : ' · Precio Manual'}
+                            </div>
+                          </div>
+
+                          {confirmDeleteKey === delKey ? (
+                            <div className="inline-flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await onDeleteAsset(a.id);
+                                    setConfirmDeleteKey(null);
+                                    setFeedback({
+                                      type: 'ok',
+                                      text: `Activo ${a.ticker} eliminado del catálogo.`,
+                                    });
+                                  } catch (err) {
+                                    setFeedback({
+                                      type: 'err',
+                                      text:
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'Error al eliminar activo.',
+                                    });
+                                  }
+                                }}
+                                className="btn-danger-soft py-1 px-2 text-xs"
+                              >
+                                Confirmar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(null)}
+                                className="btn-secondary py-1 px-2 text-xs"
+                              >
+                                Cancelar
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingAssetId(a.id);
+                                  setEditAssetTicker(a.ticker);
+                                  setEditAssetName(a.name);
+                                  setEditAssetClass(a.asset_class);
+                                  setEditAssetCurrency(a.currency);
+                                }}
+                                className="btn-secondary py-1 px-2 text-xs"
+                                aria-label={`Editar activo ${a.ticker}`}
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                                <span>Editar</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteKey(delKey)}
+                                className="btn-danger-soft py-1 px-2 text-xs"
+                                aria-label={`Eliminar activo ${a.ticker}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           </section>
         </div>
       )}
     </div>
-  );
-}
-
-interface EditableSnapshotRow {
-  row_id: string;
-  ticker: string;
-  asset_name: string;
-  asset_class: AssetClass;
-  quantity: string;
-  avg_cost: string;
-  last_price: string;
-  uncertain_fields: string[];
-}
-
-function SnapshotDraftReviewCard({
-  draft,
-  portfolio,
-  onConfirm,
-  onDiscard,
-}: {
-  draft: PortfolioSnapshotDraftRecord;
-  portfolio: PortfolioRecord | undefined;
-  onConfirm: (
-    rows: Array<{
-      ticker: string;
-      asset_name: string;
-      asset_class: AssetClass;
-      quantity: number;
-      avg_cost: number;
-      last_price: number;
-    }>
-  ) => Promise<void>;
-  onDiscard: () => Promise<void>;
-}) {
-  const initialParsed = (() => {
-    try {
-      return JSON.parse(draft.rows_json) as ParsedPortfolioSnapshotRow[];
-    } catch {
-      return [];
-    }
-  })();
-
-  const [rows, setRows] = useState<EditableSnapshotRow[]>(() =>
-    initialParsed.map((r) => ({
-      row_id: r.row_id,
-      ticker: r.ticker ?? '',
-      asset_name: r.asset_name ?? '',
-      asset_class: r.asset_class ?? 'cedear',
-      quantity: r.quantity !== null ? String(r.quantity) : '',
-      avg_cost: r.avg_cost !== null ? String(fromCents(r.avg_cost)) : '',
-      last_price: r.last_price !== null ? String(fromCents(r.last_price)) : '',
-      uncertain_fields: r.uncertain_fields ?? [],
-    }))
-  );
-  const [rowError, setRowError] = useState<string | null>(null);
-
-  const handleConfirmClick = async () => {
-    setRowError(null);
-    const validated: Array<{
-      ticker: string;
-      asset_name: string;
-      asset_class: AssetClass;
-      quantity: number;
-      avg_cost: number;
-      last_price: number;
-    }> = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const ticker = r.ticker.trim().toUpperCase();
-      if (!ticker) {
-        setRowError(`Fila #${i + 1}: El Ticker es obligatorio (RN-05).`);
-        return;
-      }
-      const q = Number.parseFloat(r.quantity.replace(',', '.'));
-      if (!Number.isFinite(q) || q < 0) {
-        setRowError(`Fila #${i + 1} (${ticker}): Cantidad inválida.`);
-        return;
-      }
-      try {
-        const avgCostCents = toCents(r.avg_cost);
-        const lastPriceCents = toCents(r.last_price);
-        if (avgCostCents < 0 || lastPriceCents < 0) {
-          setRowError(`Fila #${i + 1} (${ticker}): Los costos y precios no pueden ser negativos.`);
-          return;
-        }
-        validated.push({
-          ticker,
-          asset_name: r.asset_name.trim() || `Activo ${ticker}`,
-          asset_class: r.asset_class,
-          quantity: q,
-          avg_cost: avgCostCents,
-          last_price: lastPriceCents,
-        });
-      } catch {
-        setRowError(
-          `Fila #${i + 1} (${ticker}): Completá el Costo Promedio y el Último Precio antes de confirmar.`
-        );
-        return;
-      }
-    }
-
-    await onConfirm(validated);
-  };
-
-  return (
-    <section className="bg-white border border-slate-300 rounded-xl p-6 space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-        <div>
-          <h3 className="text-base font-semibold text-slate-900">
-            Borrador de Captura en Revisión · {portfolio?.name ?? 'Cartera'} ({portfolio?.base_currency ?? 'ARS'})
-          </h3>
-          <p className="text-xs text-slate-500">
-            RN-04 y RN-05: Completá cualquier campo marcado en amarillo antes de confirmar en bloque.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleConfirmClick}
-            className="btn-primary py-2 px-3.5 text-xs"
-          >
-            <Check className="w-4 h-4" />
-            <span>Confirmar Tenencias en Bloque</span>
-          </button>
-          <button
-            type="button"
-            onClick={onDiscard}
-            className="btn-danger-soft py-2 px-3 text-xs"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Descartar</span>
-          </button>
-        </div>
-      </div>
-
-      {rowError && (
-        <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
-          {rowError}
-        </div>
-      )}
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="border-b border-slate-200 text-xs font-medium text-slate-500">
-              <th className="py-2 pr-2">Ticker</th>
-              <th className="py-2 px-2">Nombre Activo</th>
-              <th className="py-2 px-2">Clase</th>
-              <th className="py-2 px-2 text-right">Cantidad</th>
-              <th className="py-2 px-2 text-right">Costo Promedio (PPP)</th>
-              <th className="py-2 pl-2 text-right">Último Precio</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 text-xs">
-            {rows.map((r, idx) => (
-              <tr key={r.row_id}>
-                <td className="py-2 pr-2">
-                  <input
-                    type="text"
-                    aria-label={`Ticker fila ${idx + 1}`}
-                    value={r.ticker}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[idx] = { ...r, ticker: e.target.value.toUpperCase() };
-                      setRows(next);
-                    }}
-                    className={`w-24 py-1.5 px-2 font-mono uppercase rounded border ${
-                      !r.ticker ? 'border-amber-400 bg-amber-50/40' : 'border-slate-200'
-                    }`}
-                  />
-                </td>
-                <td className="py-2 px-2">
-                  <input
-                    type="text"
-                    aria-label={`Nombre activo fila ${idx + 1}`}
-                    value={r.asset_name}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[idx] = { ...r, asset_name: e.target.value };
-                      setRows(next);
-                    }}
-                    className="w-40 py-1.5 px-2 rounded border border-slate-200"
-                  />
-                </td>
-                <td className="py-2 px-2">
-                  <select
-                    aria-label={`Clase activo fila ${idx + 1}`}
-                    value={r.asset_class}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[idx] = { ...r, asset_class: e.target.value as AssetClass };
-                      setRows(next);
-                    }}
-                    className="py-1.5 px-2 rounded border border-slate-200 bg-white"
-                  >
-                    <option value="cedear">CEDEAR</option>
-                    <option value="stock">Acción / ETF</option>
-                    <option value="bond">Bono / ON</option>
-                    <option value="fci">FCI</option>
-                    <option value="crypto">Cripto</option>
-                    <option value="other">Otro</option>
-                  </select>
-                </td>
-                <td className="py-2 px-2 text-right">
-                  <input
-                    type="text"
-                    aria-label={`Cantidad fila ${idx + 1}`}
-                    value={r.quantity}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[idx] = { ...r, quantity: e.target.value };
-                      setRows(next);
-                    }}
-                    className={`w-24 py-1.5 px-2 font-mono text-right rounded border ${
-                      !r.quantity ? 'border-amber-400 bg-amber-50/40' : 'border-slate-200'
-                    }`}
-                  />
-                </td>
-                <td className="py-2 px-2 text-right">
-                  <input
-                    type="text"
-                    aria-label={`Costo promedio fila ${idx + 1}`}
-                    placeholder="Incierta (RN-05)"
-                    value={r.avg_cost}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[idx] = { ...r, avg_cost: e.target.value };
-                      setRows(next);
-                    }}
-                    className={`w-28 py-1.5 px-2 font-mono text-right rounded border ${
-                      !r.avg_cost ? 'border-amber-400 bg-amber-50/40' : 'border-slate-200'
-                    }`}
-                  />
-                </td>
-                <td className="py-2 pl-2 text-right">
-                  <input
-                    type="text"
-                    aria-label={`Último precio fila ${idx + 1}`}
-                    placeholder="Incierta (RN-05)"
-                    value={r.last_price}
-                    onChange={(e) => {
-                      const next = [...rows];
-                      next[idx] = { ...r, last_price: e.target.value };
-                      setRows(next);
-                    }}
-                    className={`w-28 py-1.5 px-2 font-mono text-right rounded border ${
-                      !r.last_price ? 'border-amber-400 bg-amber-50/40' : 'border-slate-200'
-                    }`}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
   );
 }

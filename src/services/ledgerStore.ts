@@ -1,4 +1,8 @@
-import { applyTradeToHolding, canAutoQuoteWithYahoo } from '../shared/investments';
+import {
+  applyTradeToHolding,
+  canAutoQuoteWithYahoo,
+  recalculateHoldingFromTrades,
+} from '../shared/investments';
 import { validateTransactionInvariants } from '../shared/ledger';
 import { assertNonNegativeCents, assertPositiveCents } from '../shared/money';
 import type {
@@ -318,6 +322,36 @@ function createSeedState(user: UserSession): LocalDbState {
       realized_gain: null,
       note: 'Posición core S&P 500',
       created_at: now - 86400 * 10,
+    },
+    {
+      id: 'tr-seed-3',
+      user_id: uid,
+      portfolio_id: 'port-iol-ars',
+      asset_id: 'asset-al30',
+      side: 'buy',
+      quantity: 400,
+      price: 68500,
+      fee: 0,
+      date: shiftDaysIso(-8),
+      settlement_account_id: 'acc-santander',
+      realized_gain: null,
+      note: 'Compra Bono Soberano AL30',
+      created_at: now - 86400 * 8,
+    },
+    {
+      id: 'tr-seed-4',
+      user_id: uid,
+      portfolio_id: 'port-ibkr-usd',
+      asset_id: 'asset-msft-usd',
+      side: 'buy',
+      quantity: 3,
+      price: 40500,
+      fee: 0,
+      date: shiftDaysIso(-6),
+      settlement_account_id: 'acc-caja-usd',
+      realized_gain: null,
+      note: 'Compra acciones Microsoft',
+      created_at: now - 86400 * 6,
     },
   ];
 
@@ -853,6 +887,82 @@ export const ledgerStore = {
     return res.data.portfolio;
   },
 
+  async updatePortfolio(input: {
+    id: string;
+    name: string;
+    broker: string | null;
+    base_currency: Currency;
+  }): Promise<PortfolioRecord> {
+    const res = await tryApiFetch<{ portfolio: PortfolioRecord }>('/api/portfolios', {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      let updated: PortfolioRecord | null = null;
+      const portfolios = state.portfolios.map((p) => {
+        if (p.id === input.id) {
+          updated = {
+            ...p,
+            name: input.name.trim(),
+            broker: input.broker?.trim() || null,
+            base_currency: input.base_currency,
+          };
+          return updated;
+        }
+        return p;
+      });
+      if (!updated) throw new Error('Cartera no encontrada.');
+
+      const hasCashForCurrency = state.portfolioCash.some(
+        (c) => c.portfolio_id === input.id && c.currency === input.base_currency
+      );
+      const portfolioCash = hasCashForCurrency
+        ? state.portfolioCash
+        : [
+            ...state.portfolioCash,
+            {
+              portfolio_id: input.id,
+              user_id: state.user.id,
+              currency: input.base_currency,
+              amount: 0,
+            },
+          ];
+
+      writeLocalState({ ...state, portfolios, portfolioCash });
+      return updated;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.portfolio;
+  },
+
+  async deletePortfolio(id: string): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/portfolios', {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      writeLocalState({
+        ...state,
+        portfolios: state.portfolios.filter((p) => p.id !== id),
+        holdings: state.holdings.filter((h) => h.portfolio_id !== id),
+        portfolioCash: state.portfolioCash.filter((c) => c.portfolio_id !== id),
+        trades: state.trades.filter((t) => t.portfolio_id !== id),
+        portfolioIncomes: state.portfolioIncomes.filter((i) => i.portfolio_id !== id),
+        snapshotDrafts: state.snapshotDrafts.filter((d) => d.portfolio_id !== id),
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+  },
+
   async createAsset(input: {
     ticker: string;
     name: string;
@@ -889,6 +999,74 @@ export const ledgerStore = {
     return res.data.asset;
   },
 
+  async updateAsset(input: {
+    id: string;
+    ticker: string;
+    name: string;
+    asset_class: AssetClass;
+    currency: Currency;
+  }): Promise<AssetRecord> {
+    const ticker = input.ticker.trim().toUpperCase();
+    const res = await tryApiFetch<{ asset: AssetRecord }>('/api/assets', {
+      method: 'PATCH',
+      body: JSON.stringify({ ...input, ticker }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const duplicate = state.assets.find(
+        (a) => a.ticker.toUpperCase() === ticker && a.id !== input.id
+      );
+      if (duplicate) throw new Error(`Ya existe otro activo con el ticker ${ticker}.`);
+
+      let updated: AssetRecord | null = null;
+      const assets = state.assets.map((a) => {
+        if (a.id === input.id) {
+          updated = {
+            ...a,
+            ticker,
+            name: input.name.trim() || `Activo ${ticker}`,
+            asset_class: input.asset_class,
+            currency: input.currency,
+          };
+          return updated;
+        }
+        return a;
+      });
+      if (!updated) throw new Error('Activo no encontrado.');
+      writeLocalState({ ...state, assets });
+      return updated;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+    return res.data.asset;
+  },
+
+  async deleteAsset(id: string): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/assets', {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      writeLocalState({
+        ...state,
+        assets: state.assets.filter((a) => a.id !== id),
+        holdings: state.holdings.filter((h) => h.asset_id !== id),
+        trades: state.trades.filter((t) => t.asset_id !== id),
+        portfolioIncomes: state.portfolioIncomes.map((inc) =>
+          inc.asset_id === id ? { ...inc, asset_id: null } : inc
+        ),
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+  },
+
   async updateHoldingPrice(input: {
     id: string;
     last_price: number;
@@ -919,6 +1097,30 @@ export const ledgerStore = {
 
     if (res.kind === 'error') throw new Error(res.error);
     return res.data.holding;
+  },
+
+  async deleteHolding(id: string): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/holdings', {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const target = state.holdings.find((h) => h.id === id);
+      if (!target) return;
+      writeLocalState({
+        ...state,
+        holdings: state.holdings.filter((h) => h.id !== id),
+        trades: state.trades.filter(
+          (t) => !(t.portfolio_id === target.portfolio_id && t.asset_id === target.asset_id)
+        ),
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
   },
 
   async updatePortfolioCash(input: {
@@ -1037,6 +1239,147 @@ export const ledgerStore = {
     return res.data;
   },
 
+  async updateTrade(input: {
+    id: string;
+    side: TradeSide;
+    quantity: number;
+    price: number;
+    fee: number;
+    date: string;
+    settlement_account_id: string | null;
+    note: string | null;
+  }): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/trades', {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const target = state.trades.find((t) => t.id === input.id);
+      if (!target) throw new Error('Operación no encontrada.');
+
+      const pairTrades = state.trades
+        .filter((t) => t.portfolio_id === target.portfolio_id && t.asset_id === target.asset_id)
+        .map((t) =>
+          t.id === input.id
+            ? {
+                ...t,
+                side: input.side,
+                quantity: input.quantity,
+                price: assertPositiveCents(input.price, 'price'),
+                fee: assertNonNegativeCents(input.fee, 'fee'),
+                date: input.date,
+                settlement_account_id: input.settlement_account_id,
+                note: input.note?.trim() || null,
+              }
+            : t
+        );
+
+      const existingHolding = state.holdings.find(
+        (h) => h.portfolio_id === target.portfolio_id && h.asset_id === target.asset_id
+      );
+
+      const recalc = recalculateHoldingFromTrades(
+        pairTrades,
+        existingHolding?.last_price ?? input.price,
+        existingHolding?.last_price_date ?? input.date
+      );
+
+      const updatedPairMap = new Map(recalc.updatedTrades.map((t) => [t.id, t]));
+      const nextTrades = state.trades.map((t) => updatedPairMap.get(t.id) ?? t);
+
+      const nextHolding: HoldingRecord = {
+        id: existingHolding?.id ?? crypto.randomUUID(),
+        user_id: state.user.id,
+        portfolio_id: target.portfolio_id,
+        asset_id: target.asset_id,
+        quantity: recalc.quantity,
+        avg_cost: recalc.avgCostCents,
+        last_price: recalc.lastPriceCents,
+        last_price_date: recalc.lastPriceDate,
+      };
+
+      const nextHoldings = existingHolding
+        ? state.holdings.map((h) => (h.id === existingHolding.id ? nextHolding : h))
+        : [...state.holdings, nextHolding];
+
+      writeLocalState({
+        ...state,
+        trades: nextTrades,
+        holdings: nextHoldings,
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+  },
+
+  async deleteTrade(id: string): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/trades', {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      const target = state.trades.find((t) => t.id === id);
+      if (!target) throw new Error('Operación no encontrada.');
+
+      const remainingPairTrades = state.trades.filter(
+        (t) =>
+          t.portfolio_id === target.portfolio_id &&
+          t.asset_id === target.asset_id &&
+          t.id !== id
+      );
+
+      const existingHolding = state.holdings.find(
+        (h) => h.portfolio_id === target.portfolio_id && h.asset_id === target.asset_id
+      );
+
+      const recalc = recalculateHoldingFromTrades(
+        remainingPairTrades,
+        existingHolding?.last_price ?? 0,
+        existingHolding?.last_price_date ?? null
+      );
+
+      const updatedPairMap = new Map(recalc.updatedTrades.map((t) => [t.id, t]));
+      const nextTrades = state.trades
+        .filter((t) => t.id !== id)
+        .map((t) => updatedPairMap.get(t.id) ?? t);
+
+      let nextHoldings = state.holdings;
+      if (existingHolding) {
+        if (remainingPairTrades.length === 0) {
+          nextHoldings = state.holdings.filter((h) => h.id !== existingHolding.id);
+        } else {
+          nextHoldings = state.holdings.map((h) =>
+            h.id === existingHolding.id
+              ? {
+                  ...h,
+                  quantity: recalc.quantity,
+                  avg_cost: recalc.avgCostCents,
+                  last_price: recalc.lastPriceCents,
+                  last_price_date: recalc.lastPriceDate,
+                }
+              : h
+          );
+        }
+      }
+
+      writeLocalState({
+        ...state,
+        trades: nextTrades,
+        holdings: nextHoldings,
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
+  },
+
   async createPortfolioIncome(input: {
     portfolio_id: string;
     asset_id: string | null;
@@ -1075,6 +1418,25 @@ export const ledgerStore = {
 
     if (res.kind === 'error') throw new Error(res.error);
     return res.data.income;
+  },
+
+  async deletePortfolioIncome(id: string): Promise<void> {
+    const res = await tryApiFetch<{ ok: boolean }>('/api/portfolio-incomes', {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
+    });
+
+    if (res.kind === 'fallback') {
+      const state = readLocalState();
+      if (!state?.user) throw new Error('Sesión no iniciada.');
+      writeLocalState({
+        ...state,
+        portfolioIncomes: state.portfolioIncomes.filter((i) => i.id !== id),
+      });
+      return;
+    }
+
+    if (res.kind === 'error') throw new Error(res.error);
   },
 
   async createSnapshotDraft(input: {
@@ -1249,13 +1611,14 @@ export const ledgerStore = {
       };
 
       const holdings = state.holdings.map((h) => {
+        if (h.quantity <= 0) return h;
         if (holdingIds && !holdingIds.includes(h.id)) return h;
         const asset = assetMap.get(h.asset_id);
         if (!asset) return h;
 
         if (!canAutoQuoteWithYahoo(asset)) {
           skippedReasons.push(
-            `${asset.ticker}: Prohibido auto-cotizar CEDEARs o activos en ARS con Yahoo Finance.`
+            `${asset.ticker} (${asset.currency}): Cotización manual (CEDEAR / ARS sujeto a ratio y CCL).`
           );
           return h;
         }

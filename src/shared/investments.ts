@@ -11,6 +11,7 @@ import type {
   PortfolioRecord,
   SnapshotRowUncertainField,
   TotalWealthSummary,
+  TradeRecord,
   TradeSide,
   TransactionRecord,
 } from './types';
@@ -96,6 +97,66 @@ export function applyTradeToHolding(input: TradeExecutionInput): TradeExecutionR
     nextQuantity,
     nextAvgCostCents,
     realizedGainCents,
+  };
+}
+
+export interface RecalculatedTradeSeries {
+  quantity: number;
+  avgCostCents: number;
+  lastPriceCents: number;
+  lastPriceDate: string | null;
+  updatedTrades: TradeRecord[];
+}
+
+/**
+ * Recalcula de forma determinística la tenencia (quantity y avg_cost PPP) y los resultados
+ * realizados (realized_gain) de una serie de operaciones (trades) de un mismo (portfolio_id, asset_id)
+ * tras editar o eliminar una operación (RN-02).
+ */
+export function recalculateHoldingFromTrades(
+  tradesForPair: ReadonlyArray<TradeRecord>,
+  fallbackLastPriceCents = 0,
+  fallbackLastPriceDate: string | null = null
+): RecalculatedTradeSeries {
+  const sorted = [...tradesForPair].sort((a, b) => {
+    const byDate = a.date.localeCompare(b.date);
+    if (byDate !== 0) return byDate;
+    return a.created_at - b.created_at;
+  });
+
+  let currentQuantity = 0;
+  let currentAvgCostCents = 0;
+  let latestPriceCents = fallbackLastPriceCents;
+  let latestPriceDate = fallbackLastPriceDate;
+  const realizedById = new Map<string, number | null>();
+
+  for (const tr of sorted) {
+    const res = applyTradeToHolding({
+      currentQuantity,
+      currentAvgCostCents,
+      side: tr.side,
+      tradeQuantity: tr.quantity,
+      tradePriceCents: tr.price,
+      feeCents: tr.fee,
+    });
+    currentQuantity = res.nextQuantity;
+    currentAvgCostCents = res.nextAvgCostCents;
+    latestPriceCents = tr.price;
+    latestPriceDate = tr.date;
+    realizedById.set(tr.id, res.realizedGainCents);
+  }
+
+  const updatedTrades = [...tradesForPair].map((tr) => ({
+    ...tr,
+    realized_gain: realizedById.has(tr.id) ? (realizedById.get(tr.id) ?? null) : tr.realized_gain,
+  }));
+
+  return {
+    quantity: currentQuantity,
+    avgCostCents: currentAvgCostCents,
+    lastPriceCents: sorted.length > 0 ? latestPriceCents : fallbackLastPriceCents,
+    lastPriceDate: sorted.length > 0 ? latestPriceDate : fallbackLastPriceDate,
+    updatedTrades,
   };
 }
 

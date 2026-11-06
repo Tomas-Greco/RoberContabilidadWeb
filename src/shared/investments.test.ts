@@ -285,3 +285,57 @@ test('Patrimonio Total Bimonetario (V1 + V2) y regla de cotización Yahoo Financ
   assert.equal(expenseSlices[1].percentage, 25);
 });
 
+test('RN-02: recalculateHoldingFromTrades recalcula PPP y resultado realizado al editar o borrar operaciones', async () => {
+  const { recalculateHoldingFromTrades } = await import('./investments');
+
+  const initialTrades = [
+    {
+      id: 'tr-1',
+      user_id: 'u1',
+      portfolio_id: 'p1',
+      asset_id: 'a1',
+      side: 'buy' as const,
+      quantity: 10,
+      price: 10000, // $100,00
+      fee: 0,
+      date: '2026-11-01',
+      settlement_account_id: null,
+      realized_gain: null,
+      note: null,
+      created_at: 100,
+    },
+    {
+      id: 'tr-2',
+      user_id: 'u1',
+      portfolio_id: 'p1',
+      asset_id: 'a1',
+      side: 'sell' as const,
+      quantity: 4,
+      price: 15000, // $150,00
+      fee: 0,
+      date: '2026-11-02',
+      settlement_account_id: null,
+      realized_gain: null,
+      note: null,
+      created_at: 200,
+    },
+  ];
+
+  // Si se edita el precio de compra inicial de $100,00 a $120,00 (12000 centavos):
+  const editedTrades = initialTrades.map((t) =>
+    t.id === 'tr-1' ? { ...t, price: 12000 } : t
+  );
+  const recalc = recalculateHoldingFromTrades(editedTrades);
+  assert.equal(recalc.quantity, 6);
+  assert.equal(recalc.avgCostCents, 12000);
+  const sellTrade = recalc.updatedTrades.find((t) => t.id === 'tr-2')!;
+  // Ganancia realizada de vender 4 a $150 con PPP $120 = 4 * $30 = $120,00 (12000 centavos)
+  assert.equal(sellTrade.realized_gain, 12000);
+
+  // Si se borra la venta (tr-2), quedan las 10 unidades originales a $120,00:
+  const afterDeleteSell = recalculateHoldingFromTrades([editedTrades[0]]);
+  assert.equal(afterDeleteSell.quantity, 10);
+  assert.equal(afterDeleteSell.avgCostCents, 12000);
+});
+
+
