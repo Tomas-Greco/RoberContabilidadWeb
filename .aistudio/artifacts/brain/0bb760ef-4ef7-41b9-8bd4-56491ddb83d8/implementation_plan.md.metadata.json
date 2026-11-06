@@ -1,0 +1,6 @@
+{
+  "summary": "Plan de implementación para cifrado simétrico AES-GCM 256 bits transparente con PBKDF2 (Web Crypto API nativa) derivado del Google Sub ID del usuario, protegiendo notas y detalles sensibles sin pedir contraseñas.",
+  "updatedAt": "2026-11-06T02:54:53.097202073Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

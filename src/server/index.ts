@@ -7,6 +7,11 @@ import {
   signSessionJwt,
   verifySessionJwt,
 } from '../../functions/api/_crypto';
+import {
+  decryptSensitiveText,
+  deriveUserAesKey,
+  encryptSensitiveText,
+} from '../shared/encryption';
 import { LedgerRuleError, validateTransactionInvariants } from '../shared/ledger';
 import { assertNonNegativeCents, assertPositiveCents, MoneyValidationError } from '../shared/money';
 import type {
@@ -28,6 +33,7 @@ export interface Env {
   DB: D1Database;
   GOOGLE_CLIENT_ID?: string;
   SESSION_SECRET?: string;
+  RESTRICT_TO_AR?: string;
   ASSETS?: { fetch: (request: Request) => Promise<Response> };
 }
 
@@ -59,6 +65,17 @@ const DEFAULT_CATEGORIES: ReadonlyArray<{ name: string; kind: 'income' | 'expens
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // 0. Bloqueo geográfico opcional por subdominio (Cloudflare 'cf-ipcountry')
+    if (env.RESTRICT_TO_AR === '1' || env.RESTRICT_TO_AR === 'true') {
+      const country = request.headers.get('cf-ipcountry');
+      if (country && country.toUpperCase() !== 'AR') {
+        return new Response('Acceso restringido: Esta aplicación solo está disponible en Argentina.', {
+          status: 403,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        });
+      }
+    }
+
     const url = new URL(request.url);
     const pathname = url.pathname;
     const isHttps = url.protocol === 'https:';
@@ -170,6 +187,9 @@ export default {
         return err('Base de datos D1 no vinculada.', 500);
       }
 
+      // Clave AES-GCM 256 derivada para este usuario autenticado
+      const userAesKey = await deriveUserAesKey(user.id, user.id, secret);
+
       // 3. /api/accounts
       if (pathname === '/api/accounts') {
         if (request.method === 'GET') {
@@ -277,7 +297,7 @@ export default {
         }
       }
 
-      // 5. /api/transactions
+      // 5. /api/transactions (Cifrado simétrico AES-GCM 256 bits para notas sensibles)
       if (pathname === '/api/transactions') {
         if (request.method === 'GET') {
           const { results } = await env.DB.prepare(
@@ -285,7 +305,16 @@ export default {
           )
             .bind(user.id)
             .all<TransactionRecord>();
-          return json({ transactions: results });
+
+          // Descifrar notas transparentemente con la clave AES-GCM del usuario
+          const decryptedTransactions = await Promise.all(
+            results.map(async (tx) => ({
+              ...tx,
+              note: await decryptSensitiveText(tx.note, userAesKey),
+            }))
+          );
+
+          return json({ transactions: decryptedTransactions });
         }
 
         if (request.method === 'POST') {
@@ -340,7 +369,10 @@ export default {
           const id = crypto.randomUUID();
           const createdAt = Math.floor(Date.now() / 1000);
           const source = body.source ?? 'manual';
-          const note = body.note?.trim() || null;
+          const plainNote = body.note?.trim() || null;
+
+          // Cifrar la nota con AES-GCM 256 bits antes de persistir en SQLite D1
+          const encryptedNote = await encryptSensitiveText(plainNote, userAesKey);
 
           await env.DB.prepare(
             `INSERT INTO transactions (id, user_id, date, type, account_id, counter_account_id, category_id, amount, currency, note, source, voided_at, created_at)
@@ -356,7 +388,7 @@ export default {
               categoryId,
               body.amount,
               body.currency,
-              note,
+              encryptedNote,
               source,
               createdAt
             )
@@ -373,7 +405,7 @@ export default {
               category_id: categoryId,
               amount: body.amount,
               currency: body.currency,
-              note,
+              note: plainNote,
               source,
               voided_at: null,
               created_at: createdAt,
@@ -398,11 +430,17 @@ export default {
             .bind(voidedAt, body.id, user.id)
             .run();
 
-          return json({ transaction: { ...existing, voided_at: voidedAt } });
+          return json({
+            transaction: {
+              ...existing,
+              note: await decryptSensitiveText(existing.note, userAesKey),
+              voided_at: voidedAt,
+            },
+          });
         }
       }
 
-      // 6. /api/drafts
+      // 6. /api/drafts (Cifrado simétrico de raw_input de comprobantes)
       if (pathname === '/api/drafts') {
         if (request.method === 'GET') {
           const { results } = await env.DB.prepare(
@@ -410,7 +448,15 @@ export default {
           )
             .bind(user.id)
             .all<MovementDraftRecord>();
-          return json({ drafts: results });
+
+          const decryptedDrafts = await Promise.all(
+            results.map(async (draft) => ({
+              ...draft,
+              raw_input: await decryptSensitiveText(draft.raw_input, userAesKey),
+            }))
+          );
+
+          return json({ drafts: decryptedDrafts });
         }
 
         if (request.method === 'POST') {
@@ -421,6 +467,8 @@ export default {
           };
           const id = crypto.randomUUID();
           const createdAt = Math.floor(Date.now() / 1000);
+          const rawInput = body.raw_input ?? null;
+          const encryptedRawInput = await encryptSensitiveText(rawInput, userAesKey);
           const extractedJson = JSON.stringify(body.parsed);
           const uncertainJson = JSON.stringify(body.parsed.uncertain_fields);
 
@@ -428,7 +476,7 @@ export default {
             `INSERT INTO movement_drafts (id, user_id, source, raw_input, extracted_json, uncertain_fields, status, matched_transaction_id, created_at)
              VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?)`
           )
-            .bind(id, user.id, body.source, body.raw_input ?? null, extractedJson, uncertainJson, createdAt)
+            .bind(id, user.id, body.source, encryptedRawInput, extractedJson, uncertainJson, createdAt)
             .run();
 
           return json({
@@ -436,7 +484,7 @@ export default {
               id,
               user_id: user.id,
               source: body.source,
-              raw_input: body.raw_input ?? null,
+              raw_input: rawInput,
               extracted_json: extractedJson,
               uncertain_fields: uncertainJson,
               status: 'pending',

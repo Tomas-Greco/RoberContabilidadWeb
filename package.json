@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
+    "test": "tsx src/shared/encryption.test.ts && tsx src/shared/core.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

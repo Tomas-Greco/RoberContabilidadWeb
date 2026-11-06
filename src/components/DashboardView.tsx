@@ -48,9 +48,13 @@ export function DashboardView({
           <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">
             Resumen Patrimonial
           </h1>
-          <p className="text-sm text-slate-600 mt-1">
-            Saldos calculados en tiempo real desde el libro diario · Período {currentMonth}
-          </p>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600 mt-1">
+            <span>Saldos calculados en tiempo real desde el libro diario</span>
+            <span aria-hidden="true">·</span>
+            <span>Período {currentMonth}</span>
+            <span aria-hidden="true">·</span>
+            <span className="text-xs text-slate-500">Cifrado AES-GCM 256 activo</span>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           <button
