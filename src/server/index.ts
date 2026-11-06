@@ -508,6 +508,48 @@ export default {
           return json({ ok: true });
         }
       }
+
+      // 7. /api/maintenance/encrypt-legacy (Cifra notas y borradores anteriores que estaban en texto plano)
+      if (pathname === '/api/maintenance/encrypt-legacy' && request.method === 'POST') {
+        const unencryptedTxs = await env.DB.prepare(
+          "SELECT id, note FROM transactions WHERE user_id = ? AND note IS NOT NULL AND note NOT LIKE 'enc:%'"
+        )
+          .bind(user.id)
+          .all<{ id: string; note: string }>();
+
+        let encryptedCount = 0;
+        if (unencryptedTxs.results && unencryptedTxs.results.length > 0) {
+          for (const tx of unencryptedTxs.results) {
+            const encNote = await encryptSensitiveText(tx.note, userAesKey);
+            await env.DB.prepare(
+              'UPDATE transactions SET note = ? WHERE id = ? AND user_id = ?'
+            )
+              .bind(encNote, tx.id, user.id)
+              .run();
+            encryptedCount++;
+          }
+        }
+
+        const unencryptedDrafts = await env.DB.prepare(
+          "SELECT id, raw_input FROM movement_drafts WHERE user_id = ? AND raw_input IS NOT NULL AND raw_input NOT LIKE 'enc:%'"
+        )
+          .bind(user.id)
+          .all<{ id: string; raw_input: string }>();
+
+        if (unencryptedDrafts.results && unencryptedDrafts.results.length > 0) {
+          for (const draft of unencryptedDrafts.results) {
+            const encInput = await encryptSensitiveText(draft.raw_input, userAesKey);
+            await env.DB.prepare(
+              'UPDATE movement_drafts SET raw_input = ? WHERE id = ? AND user_id = ?'
+            )
+              .bind(encInput, draft.id, user.id)
+              .run();
+            encryptedCount++;
+          }
+        }
+
+        return json({ ok: true, encryptedCount });
+      }
     }
 
     // Servir assets estáticos del frontend (HTML, JS, CSS)
